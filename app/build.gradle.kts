@@ -44,6 +44,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.datastore:datastore-preferences:1.1.7")
+    implementation(files("libs/netstack.aar"))
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
