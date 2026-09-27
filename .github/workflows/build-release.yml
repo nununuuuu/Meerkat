@@ -1,4 +1,4 @@
-name: Build and Release APK
+name: Build APK
 
 on:
   push:
@@ -11,10 +11,10 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-release:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -34,16 +34,9 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Prepare APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk Meerkat-v0.3.0-debug.apk
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete v0.3.0 --yes || true
-          git push origin :refs/tags/v0.3.0 || true
-          gh release create v0.3.0 Meerkat-v0.3.0-debug.apk \
-            --target "${GITHUB_SHA}" \
-            --title "Meerkat v0.3.0" \
-            --notes "Meerkat v0.3.0：介面改為繁體中文，預設停用會造成斷網的未完成 VPN 模式，新增內建 WebView 資源嗅探，只列出圖片、影片、音訊、文件、HLS/DASH 與壓縮檔，並支援複製網址與下載。"
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: meerkat-development-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
