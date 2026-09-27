@@ -9,6 +9,7 @@ import android.webkit.CookieManager
 import android.webkit.URLUtil
 import androidx.core.content.ContextCompat
 import com.resourcesniffer.app.core.Resource
+import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.core.StreamType
 import java.util.UUID
 
@@ -16,52 +17,121 @@ object DownloadHelper {
 
     fun enqueue(context: Context, resource: Resource) {
         val url = resource.url ?: error("缺少資源網址")
-        val recordId = UUID.randomUUID().toString()
-        val displayName = URLUtil.guessFileName(url, null, resource.mimeType)
-            .ifBlank { "meerkat-resource-${System.currentTimeMillis()}" }
-
-        DownloadRegistry.add(
-            DownloadRecord(
-                id = recordId,
-                url = url,
-                displayName = displayName,
-                mimeType = resource.mimeType,
-                state = DownloadState.QUEUED,
-                detail = "等待下載",
-            )
+        val cookie = resource.cookie ?: CookieManager.getInstance().getCookie(url)
+        val record = DownloadRecord(
+            id = UUID.randomUUID().toString(),
+            url = url,
+            displayName = URLUtil.guessFileName(url, null, resource.mimeType)
+                .ifBlank { "meerkat-resource-${System.currentTimeMillis()}" },
+            mimeType = resource.mimeType,
+            streamType = resource.streamType,
+            cookie = cookie,
+            referer = resource.referer,
+            userAgent = resource.userAgent,
+            state = DownloadState.QUEUED,
+            detail = "等待下載",
         )
+        enqueueRecord(context, record)
+    }
 
-        if (resource.streamType == StreamType.HLS || url.substringBefore('?').endsWith(".m3u8", true)) {
-            ContextCompat.startForegroundService(
-                context,
-                Intent(context, HlsDownloadService::class.java).apply {
-                    putExtra(HlsDownloadService.EXTRA_RECORD_ID, recordId)
-                    putExtra(HlsDownloadService.EXTRA_URL, url)
-                    putExtra(HlsDownloadService.EXTRA_COOKIE, resource.cookie ?: CookieManager.getInstance().getCookie(url))
-                    putExtra(HlsDownloadService.EXTRA_REFERER, resource.referer)
-                    putExtra(HlsDownloadService.EXTRA_USER_AGENT, resource.userAgent)
-                }
-            )
-            return
+    fun retry(context: Context, record: DownloadRecord) {
+        val retried = record.copy(
+            id = UUID.randomUUID().toString(),
+            state = DownloadState.QUEUED,
+            progress = null,
+            detail = "等待重新下載",
+            createdAt = System.currentTimeMillis(),
+        )
+        enqueueRecord(context, retried)
+    }
+
+    fun cancel(context: Context, record: DownloadRecord) {
+        if (DirectDownloadTracker.cancel(context, record.id)) return
+        DownloadRegistry.cancel(record.id)
+    }
+
+    private fun enqueueRecord(context: Context, record: DownloadRecord) {
+        DownloadRegistry.add(record)
+
+        val isHls = record.streamType == StreamType.HLS ||
+            record.url.substringBefore('?').endsWith(".m3u8", true)
+        val isDash = record.streamType == StreamType.DASH ||
+            record.url.substringBefore('?').endsWith(".mpd", true)
+
+        when {
+            isHls -> {
+                ContextCompat.startForegroundService(
+                    context,
+                    Intent(context, HlsDownloadService::class.java).apply {
+                        putExtra(HlsDownloadService.EXTRA_RECORD_ID, record.id)
+                        putExtra(HlsDownloadService.EXTRA_URL, record.url)
+                        putExtra(HlsDownloadService.EXTRA_COOKIE, record.cookie)
+                        putExtra(HlsDownloadService.EXTRA_REFERER, record.referer)
+                        putExtra(HlsDownloadService.EXTRA_USER_AGENT, record.userAgent)
+                    }
+                )
+            }
+
+            isDash -> {
+                ContextCompat.startForegroundService(
+                    context,
+                    Intent(context, DashDownloadService::class.java).apply {
+                        putExtra(DashDownloadService.EXTRA_RECORD_ID, record.id)
+                        putExtra(DashDownloadService.EXTRA_URL, record.url)
+                        putExtra(DashDownloadService.EXTRA_COOKIE, record.cookie)
+                        putExtra(DashDownloadService.EXTRA_REFERER, record.referer)
+                        putExtra(DashDownloadService.EXTRA_USER_AGENT, record.userAgent)
+                    }
+                )
+            }
+
+            else -> enqueueDirect(context, record)
         }
+    }
 
-        val request = DownloadManager.Request(Uri.parse(url))
-            .setTitle(displayName)
+    private fun enqueueDirect(context: Context, record: DownloadRecord) {
+        val request = DownloadManager.Request(Uri.parse(record.url))
+            .setTitle(record.displayName)
             .setDescription("Meerkat 資源下載")
-            .setMimeType(resource.mimeType)
+            .setMimeType(record.mimeType)
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, displayName)
+            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, record.displayName)
             .setAllowedOverMetered(true)
             .setAllowedOverRoaming(true)
 
-        val cookie = resource.cookie ?: CookieManager.getInstance().getCookie(url)
-        cookie?.takeIf { it.isNotBlank() }?.let { request.addRequestHeader("Cookie", it) }
-        resource.userAgent?.takeIf { it.isNotBlank() }?.let { request.addRequestHeader("User-Agent", it) }
-        resource.referer?.takeIf { it.isNotBlank() }?.let { request.addRequestHeader("Referer", it) }
+        record.cookie?.takeIf { it.isNotBlank() }?.let { request.addRequestHeader("Cookie", it) }
+        record.userAgent?.takeIf { it.isNotBlank() }?.let { request.addRequestHeader("User-Agent", it) }
+        record.referer?.takeIf { it.isNotBlank() }?.let { request.addRequestHeader("Referer", it) }
 
         val manager = context.getSystemService(DownloadManager::class.java)
         val systemId = manager.enqueue(request)
-        DirectDownloadTracker.track(systemId, recordId)
-        DownloadRegistry.update(recordId) { it.copy(state = DownloadState.DOWNLOADING, detail = "下載中") }
+        DirectDownloadTracker.track(systemId, record.id)
+        DownloadRegistry.update(record.id) {
+            it.copy(state = DownloadState.DOWNLOADING, detail = "下載中")
+        }
     }
+
+    fun asResource(record: DownloadRecord): Resource =
+        Resource(
+            id = 0L,
+            sessionId = 0L,
+            sourceAppPackage = null,
+            sourceAppName = null,
+            url = record.url,
+            host = Uri.parse(record.url).host ?: "未知來源",
+            mimeType = record.mimeType,
+            extension = null,
+            contentLength = null,
+            type = when {
+                record.mimeType?.startsWith("image/") == true -> ResourceType.IMAGE
+                record.mimeType?.startsWith("video/") == true -> ResourceType.VIDEO
+                record.mimeType?.startsWith("audio/") == true -> ResourceType.AUDIO
+                record.streamType != null -> ResourceType.STREAM
+                else -> ResourceType.OTHER
+            },
+            streamType = record.streamType,
+            referer = record.referer,
+            userAgent = record.userAgent,
+            cookie = record.cookie,
+        )
 }
