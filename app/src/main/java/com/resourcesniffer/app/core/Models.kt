@@ -21,6 +21,11 @@ data class Resource(
     val referer: String? = null,
     val userAgent: String? = null,
     val cookie: String? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+    val durationMs: Long? = null,
+    val videoCodec: String? = null,
+    val audioCodec: String? = null,
     val detectedAt: Long = System.currentTimeMillis(),
 )
 
