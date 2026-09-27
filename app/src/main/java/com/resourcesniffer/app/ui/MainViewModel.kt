@@ -26,6 +26,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         url: String,
         mimeType: String? = null,
         requestHeaders: Map<String, String> = emptyMap(),
+        width: Int? = null,
+        height: Int? = null,
+        durationMs: Long? = null,
     ) {
         val classification = ResourceClassifier.classify(url, mimeType)
         if (classification.type == ResourceType.OTHER) return
@@ -53,6 +56,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 referer = requestHeaders.entries.firstOrNull { it.key.equals("Referer", true) }?.value,
                 userAgent = requestHeaders.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value,
                 cookie = requestHeaders.entries.firstOrNull { it.key.equals("Cookie", true) }?.value,
+                width = width,
+                height = height,
+                durationMs = durationMs,
             )
         )
     }
