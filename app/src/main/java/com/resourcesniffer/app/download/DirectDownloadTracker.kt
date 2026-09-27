@@ -46,7 +46,15 @@ object DirectDownloadTracker {
                 DownloadRegistry.update(recordId) { old ->
                     if (old.state == DownloadState.CANCELLED) old
                     else if (status == DownloadManager.STATUS_SUCCESSFUL) {
-                        old.copy(state = DownloadState.COMPLETED, progress = 100, detail = "下載完成")
+                        val localUri = runCatching {
+                            it.getString(it.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI))
+                        }.getOrNull()
+                        old.copy(
+                            state = DownloadState.COMPLETED,
+                            progress = 100,
+                            detail = "下載完成",
+                            localUri = localUri,
+                        )
                     } else {
                         old.copy(state = DownloadState.FAILED, detail = "下載失敗（代碼 $reason）")
                     }
