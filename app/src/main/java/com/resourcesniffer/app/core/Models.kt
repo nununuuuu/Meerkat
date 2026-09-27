@@ -18,7 +18,10 @@ data class Resource(
     val contentLength: Long?,
     val type: ResourceType,
     val streamType: StreamType? = null,
-    val detectedAt: Long = System.currentTimeMillis()
+    val referer: String? = null,
+    val userAgent: String? = null,
+    val cookie: String? = null,
+    val detectedAt: Long = System.currentTimeMillis(),
 )
 
 data class SniffSession(
@@ -28,5 +31,10 @@ data class SniffSession(
     val targetPackage: String? = null,
     val targetAppName: String? = null,
     val requestCount: Int = 0,
-    val resourceCount: Int = 0
+    val resourceCount: Int = 0,
+)
+
+data class InstalledApp(
+    val label: String,
+    val packageName: String,
 )
