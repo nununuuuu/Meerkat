@@ -66,7 +66,11 @@ class SnifferVpnService : VpnService() {
         }
 
         val fd = pfd.detachFd()
-        val engine = NetstackForwarder(this, targetPackage)
+        val targetName = runCatching {
+            val info = packageManager.getApplicationInfo(targetPackage, 0)
+            packageManager.getApplicationLabel(info).toString()
+        }.getOrNull()
+        val engine = NetstackForwarder(this, targetPackage, targetName)
         forwarder = engine
 
         try {
@@ -100,7 +104,14 @@ class SnifferVpnService : VpnService() {
     private fun buildNotification(targetPackage: String?) = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.stat_sys_download_done)
         .setContentTitle("Meerkat 正在嗅探資源")
-        .setContentText(targetPackage ?: "已啟用")
+        .setContentText(
+            targetPackage?.let { pkg ->
+                runCatching {
+                    val info = packageManager.getApplicationInfo(pkg, 0)
+                    packageManager.getApplicationLabel(info).toString()
+                }.getOrDefault(pkg)
+            } ?: "已啟用"
+        )
         .setOngoing(true)
         .setContentIntent(
             PendingIntent.getActivity(
