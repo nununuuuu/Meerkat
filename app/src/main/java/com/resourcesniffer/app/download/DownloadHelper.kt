@@ -10,16 +10,32 @@ import android.webkit.URLUtil
 import androidx.core.content.ContextCompat
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.StreamType
+import java.util.UUID
 
 object DownloadHelper {
 
     fun enqueue(context: Context, resource: Resource) {
         val url = resource.url ?: error("缺少資源網址")
+        val recordId = UUID.randomUUID().toString()
+        val displayName = URLUtil.guessFileName(url, null, resource.mimeType)
+            .ifBlank { "meerkat-resource-${System.currentTimeMillis()}" }
+
+        DownloadRegistry.add(
+            DownloadRecord(
+                id = recordId,
+                url = url,
+                displayName = displayName,
+                mimeType = resource.mimeType,
+                state = DownloadState.QUEUED,
+                detail = "等待下載",
+            )
+        )
 
         if (resource.streamType == StreamType.HLS || url.substringBefore('?').endsWith(".m3u8", true)) {
             ContextCompat.startForegroundService(
                 context,
                 Intent(context, HlsDownloadService::class.java).apply {
+                    putExtra(HlsDownloadService.EXTRA_RECORD_ID, recordId)
                     putExtra(HlsDownloadService.EXTRA_URL, url)
                     putExtra(HlsDownloadService.EXTRA_COOKIE, resource.cookie ?: CookieManager.getInstance().getCookie(url))
                     putExtra(HlsDownloadService.EXTRA_REFERER, resource.referer)
@@ -29,16 +45,12 @@ object DownloadHelper {
             return
         }
 
-        val uri = Uri.parse(url)
-        val fileName = URLUtil.guessFileName(url, null, resource.mimeType)
-            .ifBlank { "meerkat-resource-${System.currentTimeMillis()}" }
-
-        val request = DownloadManager.Request(uri)
-            .setTitle(fileName)
+        val request = DownloadManager.Request(Uri.parse(url))
+            .setTitle(displayName)
             .setDescription("Meerkat 資源下載")
             .setMimeType(resource.mimeType)
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, displayName)
             .setAllowedOverMetered(true)
             .setAllowedOverRoaming(true)
 
@@ -48,6 +60,8 @@ object DownloadHelper {
         resource.referer?.takeIf { it.isNotBlank() }?.let { request.addRequestHeader("Referer", it) }
 
         val manager = context.getSystemService(DownloadManager::class.java)
-        manager.enqueue(request)
+        val systemId = manager.enqueue(request)
+        DirectDownloadTracker.track(systemId, recordId)
+        DownloadRegistry.update(recordId) { it.copy(state = DownloadState.DOWNLOADING, detail = "下載中") }
     }
 }
