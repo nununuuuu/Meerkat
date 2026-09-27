@@ -33,6 +33,18 @@ class DashDownloadService : Service() {
         const val EXTRA_COOKIE = "cookie"
         const val EXTRA_REFERER = "referer"
         const val EXTRA_USER_AGENT = "user_agent"
+
+        private fun resolve(base: String, relative: String): String =
+            URI(base).resolve(relative).toString()
+
+        private fun replaceTemplate(template: String, id: String, number: Long, time: Long): String =
+            template
+                .replace("\$RepresentationID\$", id)
+                .replace("\$Number\$", number.toString())
+                .replace("\$Time\$", time.toString())
+                .replace(Regex("""\$Number%0(\d+)d\$""")) { match ->
+                    number.toString().padStart(match.groupValues[1].toInt(), '0')
+                }
     }
 
     private val executor = Executors.newSingleThreadExecutor()
@@ -504,16 +516,4 @@ class DashDownloadService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private companion object Helpers {
-        fun resolve(base: String, relative: String): String = URI(base).resolve(relative).toString()
-
-        fun replaceTemplate(template: String, id: String, number: Long, time: Long): String =
-            template
-                .replace("\$RepresentationID\$", id)
-                .replace("\$Number\$", number.toString())
-                .replace("\$Time\$", time.toString())
-                .replace(Regex("""\$Number%0(\d+)d\$""")) { match ->
-                    number.toString().padStart(match.groupValues[1].toInt(), '0')
-                }
-    }
 }
