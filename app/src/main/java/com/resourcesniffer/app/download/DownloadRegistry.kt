@@ -75,6 +75,7 @@ object DownloadRegistry {
                     put("displayName", item.displayName)
                     put("mimeType", item.mimeType)
                     put("streamType", item.streamType?.name)
+                    put("quality", item.quality.name)
                     put("state", item.state.name)
                     put("progress", item.progress)
                     put("detail", item.detail)
@@ -111,6 +112,9 @@ object DownloadRegistry {
                             cookie = null,
                             referer = null,
                             userAgent = null,
+                            quality = nullableString(item, "quality")
+                                ?.let { runCatching { DownloadQuality.valueOf(it) }.getOrNull() }
+                                ?: DownloadQuality.HIGH,
                             state = runCatching {
                                 DownloadState.valueOf(item.getString("state"))
                             }.getOrDefault(DownloadState.FAILED),
