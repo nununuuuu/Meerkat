@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.Environment
 import android.os.IBinder
+import android.net.Uri
 import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
 import java.io.File
@@ -70,10 +71,15 @@ class HlsDownloadService : Service() {
 
         executor.execute {
             runCatching { downloadHls(url, headers, recordId) }
-                .onSuccess {
+                .onSuccess { localUri ->
                     if (recordId != null) {
                         DownloadRegistry.update(recordId) { old ->
-                            old.copy(state = DownloadState.COMPLETED, progress = 100, detail = "串流下載完成")
+                            old.copy(
+                                state = DownloadState.COMPLETED,
+                                progress = 100,
+                                detail = "串流下載完成",
+                                localUri = localUri,
+                            )
                         }
                     }
                     notifyDone("串流下載完成")
@@ -96,7 +102,7 @@ class HlsDownloadService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun downloadHls(initialUrl: String, headers: Map<String, String>, recordId: String?) {
+    private fun downloadHls(initialUrl: String, headers: Map<String, String>, recordId: String?): String {
         var playlistUrl = initialUrl
         var manifest = fetchText(playlistUrl, headers)
 
@@ -112,7 +118,8 @@ class HlsDownloadService : Service() {
         val extension = if (parsed.initSegment != null || parsed.segments.any { it.url.contains(".m4s", true) }) "mp4" else "ts"
         val outputName = "Meerkat-${System.currentTimeMillis()}.$extension"
 
-        openOutput(outputName).use { output ->
+        val target = openOutput(outputName)
+        target.stream.use { output ->
             parsed.initSegment?.let { init -> output.write(fetchBytes(init, headers)) }
 
             parsed.segments.forEachIndexed { index, segment ->
@@ -144,6 +151,7 @@ class HlsDownloadService : Service() {
             }
             output.flush()
         }
+        return target.uri.toString()
     }
 
     private fun chooseHighestVariant(manifest: String, baseUrl: String): String? {
@@ -244,22 +252,19 @@ class HlsDownloadService : Service() {
         }
     }
 
-    private fun openOutput(fileName: String): OutputStream {
-        if (Build.VERSION.SDK_INT >= 29) {
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                put(MediaStore.Downloads.MIME_TYPE, if (fileName.endsWith(".mp4")) "video/mp4" else "video/mp2t")
-                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Meerkat")
-            }
-            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: error("無法建立下載檔案")
-            return contentResolver.openOutputStream(uri) ?: error("無法開啟下載檔案")
-        }
+    private data class OutputTarget(val uri: Uri, val stream: OutputStream)
 
-        @Suppress("DEPRECATION")
-        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        val targetDir = File(dir, "Meerkat").apply { mkdirs() }
-        return File(targetDir, fileName).outputStream()
+    private fun openOutput(fileName: String): OutputTarget {
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+            put(MediaStore.Downloads.MIME_TYPE, if (fileName.endsWith(".mp4")) "video/mp4" else "video/mp2t")
+            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Meerkat")
+        }
+        val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: error("無法建立下載檔案")
+        val stream = contentResolver.openOutputStream(uri)
+            ?: error("無法開啟下載檔案")
+        return OutputTarget(uri, stream)
     }
 
     private fun updateProgress(done: Int, total: Int) {
