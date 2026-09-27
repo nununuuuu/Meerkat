@@ -476,6 +476,7 @@ private fun ResourcePane(
 private fun ResourceRow(resource: Resource) {
     val context = LocalContext.current
     val url = resource.url ?: return
+    var showPreview by remember { mutableStateOf(false) }
 
     ElevatedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -486,7 +487,15 @@ private fun ResourceRow(resource: Resource) {
             }
             Text(resource.host, style = MaterialTheme.typography.bodyMedium)
             Text(url, style = MaterialTheme.typography.bodySmall, maxLines = 3)
-            resource.contentLength?.let { Text(formatBytes(it), style = MaterialTheme.typography.labelSmall) }
+            resource.mimeType?.let { Text("MIME：$it", style = MaterialTheme.typography.labelSmall) }
+            resource.extension?.let { Text("格式：$it", style = MaterialTheme.typography.labelSmall) }
+            resource.contentLength?.let { Text("大小：${formatBytes(it)}", style = MaterialTheme.typography.labelSmall) }
+            if (resource.width != null && resource.height != null) {
+                Text("解析度：${resource.width} × ${resource.height}", style = MaterialTheme.typography.labelSmall)
+            }
+            resource.durationMs?.takeIf { it > 0 }?.let {
+                Text("時長：${formatDuration(it)}", style = MaterialTheme.typography.labelSmall)
+            }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
@@ -497,6 +506,15 @@ private fun ResourceRow(resource: Resource) {
                     Icon(Icons.Default.Download, null)
                     Spacer(Modifier.width(4.dp))
                     Text("下載")
+                }
+
+                if (resource.type == ResourceType.IMAGE ||
+                    resource.type == ResourceType.VIDEO ||
+                    resource.type == ResourceType.AUDIO
+                ) {
+                    OutlinedButton(onClick = { showPreview = true }) {
+                        Text("預覽")
+                    }
                 }
 
                 OutlinedButton(onClick = {
@@ -515,6 +533,58 @@ private fun ResourceRow(resource: Resource) {
             }
         }
     }
+
+    if (showPreview) {
+        ResourcePreviewDialog(
+            resource = resource,
+            onDismiss = { showPreview = false },
+        )
+    }
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun ResourcePreviewDialog(
+    resource: Resource,
+    onDismiss: () -> Unit,
+) {
+    val url = resource.url ?: return
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("關閉") }
+        },
+        title = { Text("資源預覽") },
+        text = {
+            AndroidView(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(360.dp),
+                factory = { context ->
+                    WebView(context).apply {
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        CookieManager.getInstance().setAcceptCookie(true)
+                        val safe = org.json.JSONObject.quote(url)
+                        val html = when (resource.type) {
+                            ResourceType.IMAGE ->
+                                "<html><body style='margin:0;background:#111;display:flex;align-items:center;justify-content:center'><img src=" +
+                                    safe +
+                                    " style='max-width:100%;max-height:100%;object-fit:contain'/></body></html>"
+                            ResourceType.VIDEO ->
+                                "<html><body style='margin:0;background:#111'><video src=" +
+                                    safe +
+                                    " controls autoplay style='width:100%;height:100%'></video></body></html>"
+                            ResourceType.AUDIO ->
+                                "<html><body><audio src=" + safe + " controls autoplay style='width:100%'></audio></body></html>"
+                            else -> "<html><body>此類型不支援內建預覽</body></html>"
+                        }
+                        loadDataWithBaseURL(url, html, "text/html", "UTF-8", null)
+                    }
+                },
+            )
+        },
+    )
 }
 
 @Composable
@@ -588,13 +658,29 @@ private fun downloadStateLabel(state: DownloadState): String = when (state) {
 private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
     val script = """
         (function() {
-          const set = new Set();
-          performance.getEntriesByType('resource').forEach(e => set.add(e.name));
-          document.querySelectorAll('img[src],video[src],audio[src],source[src],a[href]').forEach(e => {
-            const v = e.src || e.href;
-            if (v) set.add(v);
+          const map = new Map();
+          function put(url, kind, w, h, duration) {
+            if (!url) return;
+            const old = map.get(url) || {url:url, kind:null, width:null, height:null, duration:null};
+            if (kind) old.kind = kind;
+            if (w > 0) old.width = w;
+            if (h > 0) old.height = h;
+            if (isFinite(duration) && duration > 0) old.duration = duration;
+            map.set(url, old);
+          }
+
+          performance.getEntriesByType('resource').forEach(e => put(e.name, null, null, null, null));
+          document.querySelectorAll('img[src]').forEach(e => put(e.currentSrc || e.src, 'image', e.naturalWidth, e.naturalHeight, null));
+          document.querySelectorAll('video[src],video source[src]').forEach(e => {
+            const video = e.tagName === 'VIDEO' ? e : e.closest('video');
+            put(e.currentSrc || e.src, 'video', video ? video.videoWidth : null, video ? video.videoHeight : null, video ? video.duration : null);
           });
-          return JSON.stringify(Array.from(set));
+          document.querySelectorAll('audio[src],audio source[src]').forEach(e => {
+            const audio = e.tagName === 'AUDIO' ? e : e.closest('audio');
+            put(e.currentSrc || e.src, 'audio', null, null, audio ? audio.duration : null);
+          });
+          document.querySelectorAll('a[href]').forEach(e => put(e.href, null, null, null, null));
+          return JSON.stringify(Array.from(map.values()));
         })();
     """.trimIndent()
 
@@ -605,15 +691,33 @@ private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
             } else raw
             val array = JSONArray(jsonText)
             for (i in 0 until array.length()) {
-                val url = array.optString(i)
+                val item = array.optJSONObject(i) ?: continue
+                val url = item.optString("url")
                 if (url.startsWith("http://") || url.startsWith("https://")) {
+                    val kind = item.optString("kind")
+                    val mime = when (kind) {
+                        "image" -> "image/*"
+                        "video" -> "video/*"
+                        "audio" -> "audio/*"
+                        else -> null
+                    }
+                    val width = item.optInt("width").takeIf { it > 0 }
+                    val height = item.optInt("height").takeIf { it > 0 }
+                    val durationMs = item.optDouble("duration")
+                        .takeIf { it.isFinite() && it > 0 }
+                        ?.let { (it * 1000).toLong() }
+
                     viewModel.recordWebResource(
                         url = url,
+                        mimeType = mime,
                         requestHeaders = mapOf(
                             "Referer" to (webView.url ?: ""),
                             "User-Agent" to webView.settings.userAgentString,
                             "Cookie" to (CookieManager.getInstance().getCookie(url) ?: ""),
                         ),
+                        width = width,
+                        height = height,
+                        durationMs = durationMs,
                     )
                 }
             }
@@ -648,6 +752,18 @@ private fun normalizeUrl(value: String): String {
     val trimmed = value.trim()
     if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed
     return "https://$trimmed"
+}
+
+private fun formatDuration(ms: Long): String {
+    val totalSeconds = ms / 1000
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+    return if (hours > 0) {
+        "%d:%02d:%02d".format(hours, minutes, seconds)
+    } else {
+        "%d:%02d".format(minutes, seconds)
+    }
 }
 
 private fun formatBytes(value: Long): String = when {
