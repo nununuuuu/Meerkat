@@ -46,6 +46,11 @@ object SnifferRepository {
                 referer = resource.referer ?: old.referer,
                 userAgent = resource.userAgent ?: old.userAgent,
                 cookie = resource.cookie ?: old.cookie,
+                width = resource.width ?: old.width,
+                height = resource.height ?: old.height,
+                durationMs = resource.durationMs ?: old.durationMs,
+                videoCodec = resource.videoCodec ?: old.videoCodec,
+                audioCodec = resource.audioCodec ?: old.audioCodec,
             )
             listOf(replacement) + current.filterIndexed { index, _ -> index != existing }
         } else {
@@ -89,6 +94,11 @@ object SnifferRepository {
                     put("type", resource.type.name)
                     put("streamType", resource.streamType?.name)
                     put("referer", resource.referer)
+                    put("width", resource.width)
+                    put("height", resource.height)
+                    put("durationMs", resource.durationMs)
+                    put("videoCodec", resource.videoCodec)
+                    put("audioCodec", resource.audioCodec)
                     put("detectedAt", resource.detectedAt)
                 }
             )
@@ -125,6 +135,11 @@ object SnifferRepository {
                             streamType = item.optString("streamType").takeIf { it.isNotBlank() && it != "null" }
                                 ?.let { runCatching { StreamType.valueOf(it) }.getOrNull() },
                             referer = item.optString("referer").takeIf { it.isNotBlank() && it != "null" },
+                            width = if (item.isNull("width")) null else item.optInt("width"),
+                            height = if (item.isNull("height")) null else item.optInt("height"),
+                            durationMs = if (item.isNull("durationMs")) null else item.optLong("durationMs"),
+                            videoCodec = item.optString("videoCodec").takeIf { it.isNotBlank() && it != "null" },
+                            audioCodec = item.optString("audioCodec").takeIf { it.isNotBlank() && it != "null" },
                             detectedAt = item.optLong("detectedAt", System.currentTimeMillis()),
                         )
                     )
