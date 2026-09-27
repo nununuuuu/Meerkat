@@ -35,15 +35,15 @@ jobs:
         run: gradle :app:assembleDebug --stacktrace
 
       - name: Prepare APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk Meerkat-v0.2.0-debug.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk Meerkat-v0.3.0-debug.apk
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete v0.2.0 --yes || true
-          git push origin :refs/tags/v0.2.0 || true
-          gh release create v0.2.0 Meerkat-v0.2.0-debug.apk \
+          gh release delete v0.3.0 --yes || true
+          git push origin :refs/tags/v0.3.0 || true
+          gh release create v0.3.0 Meerkat-v0.3.0-debug.apk \
             --target "${GITHUB_SHA}" \
-            --title "Meerkat v0.2.0" \
-            --notes "ResourceSniffer v0.2 development build. Includes VPN/TUN capture metadata, DNS host mapping, TLS SNI detection, app attribution, and overlay UI. TCP/UDP forwarding is not yet implemented, so this is a development milestone rather than an always-on production sniffer."
+            --title "Meerkat v0.3.0" \
+            --notes "Meerkat v0.3.0：介面改為繁體中文，預設停用會造成斷網的未完成 VPN 模式，新增內建 WebView 資源嗅探，只列出圖片、影片、音訊、文件、HLS/DASH 與壓縮檔，並支援複製網址與下載。"
