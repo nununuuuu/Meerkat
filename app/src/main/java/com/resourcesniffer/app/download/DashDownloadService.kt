@@ -33,6 +33,7 @@ class DashDownloadService : Service() {
         const val EXTRA_COOKIE = "cookie"
         const val EXTRA_REFERER = "referer"
         const val EXTRA_USER_AGENT = "user_agent"
+        const val EXTRA_QUALITY = "quality"
 
         private fun resolve(base: String, relative: String): String =
             URI(base).resolve(relative).toString()
@@ -60,6 +61,9 @@ class DashDownloadService : Service() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
+        val quality = intent?.getStringExtra(EXTRA_QUALITY)
+            ?.let { runCatching { DownloadQuality.valueOf(it) }.getOrNull() }
+            ?: DownloadQuality.HIGH
         val headers = buildMap {
             intent.getStringExtra(EXTRA_COOKIE)?.takeIf { it.isNotBlank() }?.let { put("Cookie", it) }
             intent.getStringExtra(EXTRA_REFERER)?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
@@ -84,7 +88,7 @@ class DashDownloadService : Service() {
         )
 
         executor.execute {
-            runCatching { downloadDash(url, headers, recordId) }
+            runCatching { downloadDash(url, headers, recordId, quality) }
                 .onSuccess { localUri ->
                     recordId?.let {
                         DownloadRegistry.update(it) { old ->
@@ -203,14 +207,19 @@ class DashDownloadService : Service() {
         val representations: List<Representation>,
     )
 
-    private fun downloadDash(mpdUrl: String, headers: Map<String, String>, recordId: String?): String {
+    private fun downloadDash(
+        mpdUrl: String,
+        headers: Map<String, String>,
+        recordId: String?,
+        quality: DownloadQuality,
+    ): String {
         val xml = fetchText(mpdUrl, headers)
         require(!xml.contains("urn:uuid:edef8ba9", true) && !xml.contains("cenc:pssh", true)) {
             "此 DASH 使用 DRM/CENC，Meerkat 不支援解密"
         }
 
         val manifest = parseMpd(xml, mpdUrl)
-        val selected = selectRepresentations(manifest)
+        val selected = selectRepresentations(manifest, quality)
         require(selected.isNotEmpty()) { "找不到可下載的 DASH 軌道" }
 
         val segmentLists = selected.associateWith { it.segmentUrls() }
@@ -403,16 +412,31 @@ class DashDownloadService : Service() {
         return Manifest(periodDuration ?: mpdDuration, reps)
     }
 
-    private fun selectRepresentations(manifest: Manifest): List<Representation> {
-        val video = manifest.representations
-            .filter { it.kind == TrackKind.VIDEO }
-            .maxWithOrNull(compareBy<Representation> { it.height ?: 0 }.thenBy { it.bandwidth })
-        val audio = manifest.representations
-            .filter { it.kind == TrackKind.AUDIO }
-            .maxByOrNull { it.bandwidth }
+    private fun selectRepresentations(
+        manifest: Manifest,
+        quality: DownloadQuality,
+    ): List<Representation> {
+        val videoCandidates = manifest.representations.filter { it.kind == TrackKind.VIDEO }
+        val audioCandidates = manifest.representations.filter { it.kind == TrackKind.AUDIO }
+        val comparator = compareBy<Representation> { it.height ?: 0 }.thenBy { it.bandwidth }
+
+        val video = when (quality) {
+            DownloadQuality.HIGH -> videoCandidates.maxWithOrNull(comparator)
+            DownloadQuality.LOW -> videoCandidates.minWithOrNull(comparator)
+        }
+        val audio = when (quality) {
+            DownloadQuality.HIGH -> audioCandidates.maxByOrNull { it.bandwidth }
+            DownloadQuality.LOW -> audioCandidates.minByOrNull { it.bandwidth }
+        }
 
         return listOfNotNull(video, audio).ifEmpty {
-            listOfNotNull(manifest.representations.maxByOrNull { it.bandwidth })
+            val all = manifest.representations
+            listOfNotNull(
+                when (quality) {
+                    DownloadQuality.HIGH -> all.maxByOrNull { it.bandwidth }
+                    DownloadQuality.LOW -> all.minByOrNull { it.bandwidth }
+                }
+            )
         }
     }
 
