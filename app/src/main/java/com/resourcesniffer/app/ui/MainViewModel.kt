@@ -87,6 +87,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 putExtra(SnifferVpnService.EXTRA_TARGET_PACKAGE, packageName)
             }
         )
+        context.packageManager.getLaunchIntentForPackage(packageName)?.let { launch ->
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(launch)
+        }
     }
 
     fun stopExternalCapture() {
