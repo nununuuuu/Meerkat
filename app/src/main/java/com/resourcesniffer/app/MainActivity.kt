@@ -479,6 +479,7 @@ private fun ResourceRow(resource: Resource) {
     val url = resource.url ?: return
     var showPreview by remember { mutableStateOf(false) }
     var showQualityDialog by remember { mutableStateOf(false) }
+    var showDetails by remember { mutableStateOf(false) }
 
     ElevatedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -523,6 +524,10 @@ private fun ResourceRow(resource: Resource) {
                     }
                 }
 
+                OutlinedButton(onClick = { showDetails = true }) {
+                    Text("詳情")
+                }
+
                 OutlinedButton(onClick = {
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                     clipboard.setPrimaryClip(ClipData.newPlainText("資源網址", url))
@@ -544,6 +549,38 @@ private fun ResourceRow(resource: Resource) {
         ResourcePreviewDialog(
             resource = resource,
             onDismiss = { showPreview = false },
+        )
+    }
+
+    if (showDetails) {
+        AlertDialog(
+            onDismissRequest = { showDetails = false },
+            confirmButton = {
+                TextButton(onClick = { showDetails = false }) { Text("關閉") }
+            },
+            title = { Text("資源詳情") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("類型：${resourceTypeLabel(resource.type)}")
+                    Text("來源：${resource.sourceAppName ?: resource.sourceAppPackage ?: "內建瀏覽器"}")
+                    Text("Session：${resource.sessionId}")
+                    Text("網域：${resource.host}")
+                    resource.mimeType?.let { Text("MIME：$it") }
+                    resource.extension?.let { Text("格式：$it") }
+                    resource.contentLength?.let { Text("大小：${formatBytes(it)}") }
+                    if (resource.width != null && resource.height != null) {
+                        Text("解析度：${resource.width} × ${resource.height}")
+                    }
+                    resource.durationMs?.takeIf { it > 0 }?.let {
+                        Text("時長：${formatDuration(it)}")
+                    }
+                    resource.streamType?.let { Text("串流：${it.name}") }
+                    Text("Cookie：${if (resource.cookie.isNullOrBlank()) "無" else "有"}")
+                    Text("Referer：${if (resource.referer.isNullOrBlank()) "無" else "有"}")
+                    Text("User-Agent：${if (resource.userAgent.isNullOrBlank()) "無" else "有"}")
+                    Text(resource.url.orEmpty(), style = MaterialTheme.typography.bodySmall)
+                }
+            },
         )
     }
 
