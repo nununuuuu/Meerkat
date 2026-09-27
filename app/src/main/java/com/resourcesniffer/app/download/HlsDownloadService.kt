@@ -119,8 +119,9 @@ class HlsDownloadService : Service() {
         val outputName = "Meerkat-${System.currentTimeMillis()}.$extension"
 
         val target = openOutput(outputName)
-        target.stream.use { output ->
-            var lastInit: RangedResource? = null
+        try {
+            target.stream.use { output ->
+                var lastInit: RangedResource? = null
 
             parsed.segments.forEachIndexed { index, segment ->
                 if (recordId != null && DownloadRegistry.find(recordId)?.state == DownloadState.CANCELLED) {
@@ -156,9 +157,15 @@ class HlsDownloadService : Service() {
                     }
                 }
             }
-            output.flush()
+                output.flush()
+            }
+            publishOutput(target.uri)
+            return target.uri.toString()
+        } catch (error: Throwable) {
+            runCatching { target.stream.close() }
+            runCatching { contentResolver.delete(target.uri, null, null) }
+            throw error
         }
-        return target.uri.toString()
     }
 
     private fun chooseHighestVariant(manifest: String, baseUrl: String): String? {
@@ -289,18 +296,33 @@ class HlsDownloadService : Service() {
         headers: Map<String, String>,
         range: ByteRange? = null,
     ): ByteArray {
-        val connection = URL(url).openConnection() as HttpURLConnection
-        connection.connectTimeout = 15_000
-        connection.readTimeout = 30_000
-        connection.instanceFollowRedirects = true
-        headers.forEach { (key, value) -> connection.setRequestProperty(key, value) }
-        range?.let {
-            val end = it.start + it.length - 1
-            connection.setRequestProperty("Range", "bytes=${it.start}-$end")
+        var lastError: Throwable? = null
+        repeat(3) { attempt ->
+            val connection = URL(url).openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = 15_000
+                connection.readTimeout = 30_000
+                connection.instanceFollowRedirects = true
+                headers.forEach { (key, value) -> connection.setRequestProperty(key, value) }
+                range?.let {
+                    val end = it.start + it.length - 1
+                    connection.setRequestProperty("Range", "bytes=${it.start}-$end")
+                }
+                val code = connection.responseCode
+                if (code in 200..299) {
+                    connection.inputStream.use { return it.readBytes() }
+                }
+                val retryable = code == 408 || code == 429 || code in 500..599
+                if (!retryable) error("HTTP $code：$url")
+                lastError = IllegalStateException("HTTP $code：$url")
+            } catch (error: Throwable) {
+                lastError = error
+            } finally {
+                connection.disconnect()
+            }
+            if (attempt < 2) Thread.sleep(400L * (attempt + 1))
         }
-        val code = connection.responseCode
-        require(code in 200..299) { "HTTP $code：$url" }
-        connection.inputStream.use { return it.readBytes() }
+        throw lastError ?: IllegalStateException("下載失敗：$url")
     }
 
     private fun decryptAes128(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
@@ -326,12 +348,20 @@ class HlsDownloadService : Service() {
             put(MediaStore.Downloads.DISPLAY_NAME, fileName)
             put(MediaStore.Downloads.MIME_TYPE, if (fileName.endsWith(".mp4")) "video/mp4" else "video/mp2t")
             put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Meerkat")
+            put(MediaStore.Downloads.IS_PENDING, 1)
         }
         val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
             ?: error("無法建立下載檔案")
         val stream = contentResolver.openOutputStream(uri)
             ?: error("無法開啟下載檔案")
         return OutputTarget(uri, stream)
+    }
+
+    private fun publishOutput(uri: Uri) {
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.IS_PENDING, 0)
+        }
+        contentResolver.update(uri, values, null, null)
     }
 
     private fun updateProgress(done: Int, total: Int) {
