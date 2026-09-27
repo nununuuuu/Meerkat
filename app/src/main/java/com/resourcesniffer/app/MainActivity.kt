@@ -32,12 +32,23 @@ import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Collections
+import androidx.compose.material.icons.filled.DownloadForOffline
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Stream
+import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.resourcesniffer.app.core.InstalledApp
@@ -49,6 +60,7 @@ import com.resourcesniffer.app.download.DownloadQuality
 import com.resourcesniffer.app.download.DownloadRegistry
 import com.resourcesniffer.app.download.DownloadState
 import com.resourcesniffer.app.ui.MainViewModel
+import com.resourcesniffer.app.ui.theme.MeerkatTheme
 import org.json.JSONArray
 
 class MainActivity : ComponentActivity() {
@@ -124,40 +136,62 @@ private fun MeerkatApp(
         webView?.goBack()
     }
 
-    MaterialTheme {
+    MeerkatTheme {
         Scaffold(
-            topBar = { TopAppBar(title = { Text("Meerkat 資源嗅探") }) }
+            topBar = {
+                CenterAlignedTopAppBar(
+                    title = {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Meerkat", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                when {
+                                    externalCaptureActive -> "正在嗅探外部 App"
+                                    currentSession != null -> "已建立嗅探工作階段"
+                                    else -> "資源嗅探與下載"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                )
+            },
+            bottomBar = {
+                NavigationBar {
+                    NavigationBarItem(
+                        selected = mode == MainMode.BROWSER,
+                        onClick = { mode = MainMode.BROWSER },
+                        icon = { Icon(Icons.Default.Public, null) },
+                        label = { Text("瀏覽器") },
+                    )
+                    NavigationBarItem(
+                        selected = mode == MainMode.EXTERNAL,
+                        onClick = { mode = MainMode.EXTERNAL },
+                        icon = { Icon(Icons.Default.Apps, null) },
+                        label = { Text("外部 App") },
+                    )
+                    NavigationBarItem(
+                        selected = mode == MainMode.RESOURCES,
+                        onClick = { mode = MainMode.RESOURCES },
+                        icon = { Icon(Icons.Default.Collections, null) },
+                        label = { Text("資源") },
+                    )
+                    NavigationBarItem(
+                        selected = mode == MainMode.DOWNLOADS,
+                        onClick = { mode = MainMode.DOWNLOADS },
+                        icon = { Icon(Icons.Default.DownloadForOffline, null) },
+                        label = { Text("下載") },
+                    )
+                }
+            },
         ) { padding ->
             Column(
                 Modifier
                     .padding(padding)
-                    .padding(horizontal = 12.dp)
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
                     .fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                    SegmentedButton(
-                        selected = mode == MainMode.BROWSER,
-                        onClick = { mode = MainMode.BROWSER },
-                        shape = SegmentedButtonDefaults.itemShape(0, 4),
-                    ) { Text("瀏覽器") }
-                    SegmentedButton(
-                        selected = mode == MainMode.EXTERNAL,
-                        onClick = { mode = MainMode.EXTERNAL },
-                        shape = SegmentedButtonDefaults.itemShape(1, 4),
-                    ) { Text("外部 App") }
-                    SegmentedButton(
-                        selected = mode == MainMode.RESOURCES,
-                        onClick = { mode = MainMode.RESOURCES },
-                        shape = SegmentedButtonDefaults.itemShape(2, 4),
-                    ) { Text("資源") }
-                    SegmentedButton(
-                        selected = mode == MainMode.DOWNLOADS,
-                        onClick = { mode = MainMode.DOWNLOADS },
-                        shape = SegmentedButtonDefaults.itemShape(3, 4),
-                    ) { Text("下載") }
-                }
-
                 when (mode) {
                     MainMode.BROWSER -> BrowserPane(
                         address = address,
@@ -481,26 +515,71 @@ private fun ResourceRow(resource: Resource) {
     var showQualityDialog by remember { mutableStateOf(false) }
     var showDetails by remember { mutableStateOf(false) }
 
-    ElevatedCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(resourceTypeLabel(resource.type), fontWeight = FontWeight.SemiBold)
-                resource.sourceAppName?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
-                resource.sourceAppPackage?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
-            }
-            Text(resource.host, style = MaterialTheme.typography.bodyMedium)
-            Text(url, style = MaterialTheme.typography.bodySmall, maxLines = 3)
-            resource.mimeType?.let { Text("MIME：$it", style = MaterialTheme.typography.labelSmall) }
-            resource.extension?.let { Text("格式：$it", style = MaterialTheme.typography.labelSmall) }
-            resource.contentLength?.let { Text("大小：${formatBytes(it)}", style = MaterialTheme.typography.labelSmall) }
-            if (resource.width != null && resource.height != null) {
-                Text("解析度：${resource.width} × ${resource.height}", style = MaterialTheme.typography.labelSmall)
-            }
-            resource.durationMs?.takeIf { it > 0 }?.let {
-                Text("時長：${formatDuration(it)}", style = MaterialTheme.typography.labelSmall)
+    ElevatedCard(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+    ) {
+        Column(
+            Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Surface(
+                    shape = MaterialTheme.shapes.medium,
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                ) {
+                    Box(
+                        modifier = Modifier.size(42.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = resourceTypeIcon(resource.type),
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                }
+
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        resourceSummaryTitle(resource),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        resource.sourceAppName ?: resource.host,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
+                AssistChip(
+                    onClick = { showDetails = true },
+                    label = { Text(resourceTypeLabel(resource.type)) },
+                )
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                resourceSummaryLine(resource),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Text(
+                url,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+                maxLines = 2,
+            )
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Button(onClick = {
                     if (resource.type == ResourceType.STREAM) {
                         showQualityDialog = true
@@ -524,23 +603,17 @@ private fun ResourceRow(resource: Resource) {
                     }
                 }
 
-                OutlinedButton(onClick = { showDetails = true }) {
+                TextButton(onClick = { showDetails = true }) {
                     Text("詳情")
                 }
 
-                OutlinedButton(onClick = {
+                TextButton(onClick = {
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                     clipboard.setPrimaryClip(ClipData.newPlainText("資源網址", url))
                     Toast.makeText(context, "已複製網址", Toast.LENGTH_SHORT).show()
-                }) { Text("複製網址") }
-
-                OutlinedButton(onClick = {
-                    val intent = Intent(Intent.ACTION_SEND).apply {
-                        type = "text/plain"
-                        putExtra(Intent.EXTRA_TEXT, url)
-                    }
-                    context.startActivity(Intent.createChooser(intent, "分享資源"))
-                }) { Text("分享") }
+                }) {
+                    Text("複製")
+                }
             }
         }
     }
@@ -615,6 +688,37 @@ private fun ResourceRow(resource: Resource) {
             },
         )
     }
+}
+
+private fun resourceTypeIcon(type: ResourceType) = when (type) {
+    ResourceType.IMAGE -> Icons.Default.Image
+    ResourceType.VIDEO -> Icons.Default.Movie
+    ResourceType.AUDIO -> Icons.Default.Audiotrack
+    ResourceType.DOCUMENT -> Icons.Default.Description
+    ResourceType.STREAM -> Icons.Default.Stream
+    ResourceType.ARCHIVE -> Icons.Default.FolderZip
+    ResourceType.OTHER -> Icons.Default.Collections
+}
+
+private fun resourceSummaryTitle(resource: Resource): String {
+    val resolution = if (resource.width != null && resource.height != null) {
+        "${resource.width}×${resource.height}"
+    } else null
+    return listOfNotNull(
+        resolution,
+        resource.extension?.uppercase(),
+        resource.mimeType?.substringAfter('/'),
+    ).firstOrNull() ?: resourceTypeLabel(resource.type)
+}
+
+private fun resourceSummaryLine(resource: Resource): String {
+    val parts = buildList {
+        resource.contentLength?.let { add(formatBytes(it)) }
+        resource.durationMs?.takeIf { it > 0 }?.let { add(formatDuration(it)) }
+        resource.streamType?.let { add(it.name) }
+        if (isEmpty()) add(resource.host)
+    }
+    return parts.joinToString(" · ")
 }
 
 @SuppressLint("SetJavaScriptEnabled")
