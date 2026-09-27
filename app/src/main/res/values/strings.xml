@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Resource Sniffer</string>
-    <string name="vpn_channel_name">Resource capture</string>
-    <string name="overlay_channel_name">Floating capture controls</string>
+    <string name="app_name">Meerkat 資源嗅探</string>
+    <string name="vpn_channel_name">資源嗅探服務</string>
+    <string name="overlay_channel_name">懸浮嗅探控制</string>
 </resources>
