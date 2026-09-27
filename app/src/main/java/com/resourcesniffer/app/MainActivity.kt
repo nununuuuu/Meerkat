@@ -638,12 +638,51 @@ private fun DownloadsPane(downloads: List<DownloadRecord>) {
                                         Text("重試")
                                     }
                                 }
+                                if (item.state == DownloadState.COMPLETED && !item.localUri.isNullOrBlank()) {
+                                    Button(onClick = {
+                                        openDownloadedFile(context, item)
+                                    }) {
+                                        Text("開啟")
+                                    }
+                                    OutlinedButton(onClick = {
+                                        shareDownloadedFile(context, item)
+                                    }) {
+                                        Text("分享檔案")
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+private fun openDownloadedFile(context: Context, item: DownloadRecord) {
+    val uri = item.localUri?.let(Uri::parse) ?: return
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, item.mimeType ?: "*/*")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    runCatching {
+        context.startActivity(intent)
+    }.onFailure {
+        Toast.makeText(context, "沒有可開啟此檔案的 App", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun shareDownloadedFile(context: Context, item: DownloadRecord) {
+    val uri = item.localUri?.let(Uri::parse) ?: return
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = item.mimeType ?: "*/*"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    runCatching {
+        context.startActivity(Intent.createChooser(intent, "分享下載檔案"))
+    }.onFailure {
+        Toast.makeText(context, "無法分享此檔案", Toast.LENGTH_SHORT).show()
     }
 }
 
