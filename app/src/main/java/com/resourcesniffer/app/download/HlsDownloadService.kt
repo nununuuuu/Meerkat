@@ -116,7 +116,7 @@ class HlsDownloadService : Service() {
         for (i in lines.indices) {
             val line = lines[i]
             if (!line.startsWith("#EXT-X-STREAM-INF:", true)) continue
-            val bandwidth = Regex("""(?:^|,)BANDWIDTH=(\\d+)""", RegexOption.IGNORE_CASE)
+            val bandwidth = Regex("""(?:^|,)BANDWIDTH=(\d+)""", RegexOption.IGNORE_CASE)
                 .find(line.substringAfter(':'))?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 0L
             val next = lines.drop(i + 1).firstOrNull { it.isNotBlank() && !it.startsWith("#") } ?: continue
             if (bandwidth > bestBandwidth) {
@@ -170,10 +170,10 @@ class HlsDownloadService : Service() {
     }
 
     private fun attribute(attrs: String, name: String): String? {
-        val quoted = Regex("""(?:^|,)\\s*${Regex.escape(name)}="([^"]*)"""", RegexOption.IGNORE_CASE)
+        val quoted = Regex("""(?:^|,)\s*${Regex.escape(name)}="([^"]*)"""", RegexOption.IGNORE_CASE)
             .find(attrs)?.groupValues?.getOrNull(1)
         if (quoted != null) return quoted
-        return Regex("""(?:^|,)\\s*${Regex.escape(name)}=([^,]*)""", RegexOption.IGNORE_CASE)
+        return Regex("""(?:^|,)\s*${Regex.escape(name)}=([^,]*)""", RegexOption.IGNORE_CASE)
             .find(attrs)?.groupValues?.getOrNull(1)?.trim()
     }
 
