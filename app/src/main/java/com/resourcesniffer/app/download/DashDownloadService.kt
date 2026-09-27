@@ -85,10 +85,15 @@ class DashDownloadService : Service() {
 
         executor.execute {
             runCatching { downloadDash(url, headers, recordId) }
-                .onSuccess {
+                .onSuccess { localUri ->
                     recordId?.let {
                         DownloadRegistry.update(it) { old ->
-                            old.copy(state = DownloadState.COMPLETED, progress = 100, detail = "DASH 下載完成")
+                            old.copy(
+                                state = DownloadState.COMPLETED,
+                                progress = 100,
+                                detail = "DASH 下載完成",
+                                localUri = localUri,
+                            )
                         }
                     }
                     notifyDone("DASH 下載完成")
@@ -185,7 +190,7 @@ class DashDownloadService : Service() {
         val representations: List<Representation>,
     )
 
-    private fun downloadDash(mpdUrl: String, headers: Map<String, String>, recordId: String?) {
+    private fun downloadDash(mpdUrl: String, headers: Map<String, String>, recordId: String?): String {
         val xml = fetchText(mpdUrl, headers)
         require(!xml.contains("urn:uuid:edef8ba9", true) && !xml.contains("cenc:pssh", true)) {
             "此 DASH 使用 DRM/CENC，Meerkat 不支援解密"
@@ -227,7 +232,7 @@ class DashDownloadService : Service() {
             val video = tempFiles.firstOrNull { it.first == TrackKind.VIDEO }?.second
             val audio = tempFiles.firstOrNull { it.first == TrackKind.AUDIO }?.second
 
-            if (video != null && audio != null) {
+            val localUri = if (video != null && audio != null) {
                 val muxed = File(cacheDir, "dash-${recordId ?: System.currentTimeMillis()}-muxed.mp4")
                 try {
                     muxMp4(video, audio, muxed)
@@ -238,6 +243,7 @@ class DashDownloadService : Service() {
             } else {
                 copyToDownloads(tempFiles.first().second, outputName)
             }
+            return localUri
         } finally {
             tempFiles.forEach { it.second.delete() }
         }
@@ -415,7 +421,7 @@ class DashDownloadService : Service() {
         }
     }
 
-    private fun copyToDownloads(file: File, displayName: String) {
+    private fun copyToDownloads(file: File, displayName: String): String {
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, displayName)
             put(MediaStore.Downloads.MIME_TYPE, "video/mp4")
@@ -426,6 +432,7 @@ class DashDownloadService : Service() {
         contentResolver.openOutputStream(uri)?.use { output ->
             file.inputStream().use { input -> input.copyTo(output) }
         } ?: error("無法寫入下載檔案")
+        return uri.toString()
     }
 
     private fun updateProgress(recordId: String?, done: Int, total: Int) {
