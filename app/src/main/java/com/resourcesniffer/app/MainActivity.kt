@@ -45,6 +45,7 @@ import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.download.DownloadHelper
 import com.resourcesniffer.app.download.DownloadRecord
+import com.resourcesniffer.app.download.DownloadQuality
 import com.resourcesniffer.app.download.DownloadRegistry
 import com.resourcesniffer.app.download.DownloadState
 import com.resourcesniffer.app.ui.MainViewModel
@@ -477,6 +478,7 @@ private fun ResourceRow(resource: Resource) {
     val context = LocalContext.current
     val url = resource.url ?: return
     var showPreview by remember { mutableStateOf(false) }
+    var showQualityDialog by remember { mutableStateOf(false) }
 
     ElevatedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -499,9 +501,13 @@ private fun ResourceRow(resource: Resource) {
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
-                    runCatching { DownloadHelper.enqueue(context, resource) }
-                        .onSuccess { Toast.makeText(context, "已加入下載", Toast.LENGTH_SHORT).show() }
-                        .onFailure { Toast.makeText(context, "無法下載：${it.message ?: "未知錯誤"}", Toast.LENGTH_SHORT).show() }
+                    if (resource.type == ResourceType.STREAM) {
+                        showQualityDialog = true
+                    } else {
+                        runCatching { DownloadHelper.enqueue(context, resource) }
+                            .onSuccess { Toast.makeText(context, "已加入下載", Toast.LENGTH_SHORT).show() }
+                            .onFailure { Toast.makeText(context, "無法下載：${it.message ?: "未知錯誤"}", Toast.LENGTH_SHORT).show() }
+                    }
                 }) {
                     Icon(Icons.Default.Download, null)
                     Spacer(Modifier.width(4.dp))
@@ -538,6 +544,38 @@ private fun ResourceRow(resource: Resource) {
         ResourcePreviewDialog(
             resource = resource,
             onDismiss = { showPreview = false },
+        )
+    }
+
+    if (showQualityDialog) {
+        AlertDialog(
+            onDismissRequest = { showQualityDialog = false },
+            title = { Text("選擇串流畫質") },
+            text = { Text("最高畫質會優先選擇較高解析度/bitrate；省流量會選擇較低畫質。") },
+            confirmButton = {
+                Button(onClick = {
+                    showQualityDialog = false
+                    runCatching {
+                        DownloadHelper.enqueue(context, resource, DownloadQuality.HIGH)
+                    }.onSuccess {
+                        Toast.makeText(context, "已加入最高畫質下載", Toast.LENGTH_SHORT).show()
+                    }.onFailure {
+                        Toast.makeText(context, "無法下載：${it.message ?: "未知錯誤"}", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("最高畫質") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = {
+                    showQualityDialog = false
+                    runCatching {
+                        DownloadHelper.enqueue(context, resource, DownloadQuality.LOW)
+                    }.onSuccess {
+                        Toast.makeText(context, "已加入省流量下載", Toast.LENGTH_SHORT).show()
+                    }.onFailure {
+                        Toast.makeText(context, "無法下載：${it.message ?: "未知錯誤"}", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("省流量") }
+            },
         )
     }
 }
