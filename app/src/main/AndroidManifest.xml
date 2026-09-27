@@ -67,6 +67,11 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <service
+            android:name=".download.DashDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <receiver
             android:name=".download.DirectDownloadTracker$Receiver"
             android:exported="true">
