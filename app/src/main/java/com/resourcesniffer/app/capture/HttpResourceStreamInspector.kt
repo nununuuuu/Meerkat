@@ -77,7 +77,7 @@ class HttpResourceStreamInspector(
             val length = header.lineSequence()
                 .firstOrNull { it.startsWith("Content-Length:", ignoreCase = true) }
                 ?.substringAfter(':')?.trim()?.toLongOrNull()
-            val url = pendingUrls.removeFirstOrNull() ?: continue
+            val url = if (pendingUrls.isEmpty()) continue else pendingUrls.removeFirst()
             publishIfResource(url, mime, length)
         }
     }
