@@ -32,6 +32,7 @@ class HlsDownloadService : Service() {
         const val EXTRA_COOKIE = "cookie"
         const val EXTRA_REFERER = "referer"
         const val EXTRA_USER_AGENT = "user_agent"
+        const val EXTRA_QUALITY = "quality"
     }
 
     private val executor = Executors.newSingleThreadExecutor()
@@ -52,6 +53,9 @@ class HlsDownloadService : Service() {
                 it.copy(state = DownloadState.DOWNLOADING, detail = "正在解析 HLS", progress = 0)
             }
         }
+        val quality = intent?.getStringExtra(EXTRA_QUALITY)
+            ?.let { runCatching { DownloadQuality.valueOf(it) }.getOrNull() }
+            ?: DownloadQuality.HIGH
         val headers = buildMap {
             intent.getStringExtra(EXTRA_COOKIE)?.takeIf { it.isNotBlank() }?.let { put("Cookie", it) }
             intent.getStringExtra(EXTRA_REFERER)?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
@@ -70,7 +74,7 @@ class HlsDownloadService : Service() {
         )
 
         executor.execute {
-            runCatching { downloadHls(url, headers, recordId) }
+            runCatching { downloadHls(url, headers, recordId, quality) }
                 .onSuccess { localUri ->
                     if (recordId != null) {
                         DownloadRegistry.update(recordId) { old ->
@@ -102,11 +106,16 @@ class HlsDownloadService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun downloadHls(initialUrl: String, headers: Map<String, String>, recordId: String?): String {
+    private fun downloadHls(
+        initialUrl: String,
+        headers: Map<String, String>,
+        recordId: String?,
+        quality: DownloadQuality,
+    ): String {
         var playlistUrl = initialUrl
         var manifest = fetchText(playlistUrl, headers)
 
-        val masterVariant = chooseHighestVariant(manifest, playlistUrl)
+        val masterVariant = chooseVariant(manifest, playlistUrl, quality)
         if (masterVariant != null) {
             playlistUrl = masterVariant
             manifest = fetchText(playlistUrl, headers)
@@ -190,17 +199,23 @@ class HlsDownloadService : Service() {
         val media: List<MasterMedia>,
     )
 
-    private fun chooseHighestVariant(manifest: String, baseUrl: String): String? {
+    private fun chooseVariant(
+        manifest: String,
+        baseUrl: String,
+        quality: DownloadQuality,
+    ): String? {
         val master = parseMasterPlaylist(manifest, baseUrl)
-        val best = master.variants.maxWithOrNull(
-            compareBy<MasterVariant> {
-                it.resolution
-                    ?.substringAfter('x', "")
-                    ?.toIntOrNull()
-                    ?: 0
-            }.thenBy { it.bandwidth }
-        )
-        return best?.url
+        val comparator = compareBy<MasterVariant> {
+            it.resolution
+                ?.substringAfter('x', "")
+                ?.toIntOrNull()
+                ?: 0
+        }.thenBy { it.bandwidth }
+        val selected = when (quality) {
+            DownloadQuality.HIGH -> master.variants.maxWithOrNull(comparator)
+            DownloadQuality.LOW -> master.variants.minWithOrNull(comparator)
+        }
+        return selected?.url
     }
 
     private fun parseMasterPlaylist(manifest: String, baseUrl: String): MasterPlaylist {
