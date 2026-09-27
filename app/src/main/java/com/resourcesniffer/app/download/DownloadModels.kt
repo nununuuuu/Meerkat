@@ -18,5 +18,6 @@ data class DownloadRecord(
     val state: DownloadState,
     val progress: Int? = null,
     val detail: String? = null,
+    val localUri: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
 )
