@@ -81,10 +81,13 @@ class HlsDownloadService : Service() {
                 .onFailure { error ->
                     if (recordId != null) {
                         DownloadRegistry.update(recordId) { old ->
-                            old.copy(state = DownloadState.FAILED, detail = error.message ?: "未知錯誤")
+                            if (old.state == DownloadState.CANCELLED) old
+                            else old.copy(state = DownloadState.FAILED, detail = error.message ?: "未知錯誤")
                         }
                     }
-                    notifyDone("串流下載失敗：${error.message ?: "未知錯誤"}")
+                    if (recordId == null || DownloadRegistry.find(recordId)?.state != DownloadState.CANCELLED) {
+                        notifyDone("串流下載失敗：${error.message ?: "未知錯誤"}")
+                    }
                 }
             stopForeground(STOP_FOREGROUND_DETACH)
             stopSelf(startId)
@@ -113,6 +116,9 @@ class HlsDownloadService : Service() {
             parsed.initSegment?.let { init -> output.write(fetchBytes(init, headers)) }
 
             parsed.segments.forEachIndexed { index, segment ->
+                if (recordId != null && DownloadRegistry.find(recordId)?.state == DownloadState.CANCELLED) {
+                    error("下載已取消")
+                }
                 var bytes = fetchBytes(segment.url, headers)
                 val key = segment.key
                 if (key != null && key.method.equals("AES-128", true)) {
