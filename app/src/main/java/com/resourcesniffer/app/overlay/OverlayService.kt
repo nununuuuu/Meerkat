@@ -8,6 +8,8 @@ import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -16,6 +18,8 @@ import android.view.WindowManager
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.resourcesniffer.app.R
+import com.resourcesniffer.app.MainActivity
+import com.resourcesniffer.app.repository.SnifferRepository
 
 class OverlayService : Service() {
     companion object {
@@ -24,7 +28,14 @@ class OverlayService : Service() {
     }
 
     private lateinit var windowManager: WindowManager
-    private var bubble: View? = null
+    private var bubble: TextView? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private val updateCount = object : Runnable {
+        override fun run() {
+            bubble?.text = SnifferRepository.resources.value.size.toString()
+            handler.postDelayed(this, 750)
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -43,12 +54,13 @@ class OverlayService : Service() {
                 .build()
         )
         showBubble()
+        handler.post(updateCount)
     }
 
     private fun showBubble() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val view = TextView(this).apply {
-            text = "M"
+            text = SnifferRepository.resources.value.size.toString()
             textSize = 16f
             gravity = Gravity.CENTER
             setTextColor(0xFFFFFFFF.toInt())
@@ -72,6 +84,7 @@ class OverlayService : Service() {
         var lastY = 0
         var downX = 0f
         var downY = 0f
+        var moved = false
         view.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
@@ -79,12 +92,20 @@ class OverlayService : Service() {
                     lastY = params.y
                     downX = event.rawX
                     downY = event.rawY
+                    moved = false
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    if (kotlin.math.abs(event.rawX - downX) > 8 || kotlin.math.abs(event.rawY - downY) > 8) moved = true
                     params.x = lastX - (event.rawX - downX).toInt()
                     params.y = lastY + (event.rawY - downY).toInt()
                     windowManager.updateViewLayout(view, params)
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!moved) {
+                        startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+                    }
                     true
                 }
                 else -> false
@@ -95,6 +116,7 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(updateCount)
         bubble?.let { runCatching { windowManager.removeView(it) } }
         bubble = null
         super.onDestroy()
