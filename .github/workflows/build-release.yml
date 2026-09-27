@@ -33,14 +33,15 @@ jobs:
 
       - name: Install Android NDK
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "ndk;27.2.12479018"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "ndk;27.2.12479018"
 
       - name: Build gVisor netstack bridge
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
           GOTOOLCHAIN: auto
         run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
           git clone --depth 1 https://github.com/IEAmir/NetValve.git /tmp/netvalve
           cd /tmp/netvalve/netstack
           chmod +x build-aar.sh
