@@ -1,4 +1,4 @@
-name: Build and Release APK
+name: Build APK
 
 on:
   push:
@@ -11,10 +11,10 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-release:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -59,23 +59,9 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Prepare APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk Meerkat-v0.4.1-debug.apk
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Meerkat-v0.4.1-debug
-          path: Meerkat-v0.4.1-debug.apk
+          name: meerkat-development-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete v0.4.1 --yes || true
-          git push origin :refs/tags/v0.4.1 || true
-          gh release create v0.4.1 Meerkat-v0.4.1-debug.apk \
-            --target "$GITHUB_SHA" \
-            --title "Meerkat v0.4.1" \
-            --notes "修正版：修正內建瀏覽器空白/無畫面問題，加入載入進度與主頁錯誤提示；懸浮球改顯示本次 Session 的真實資源數；外部 App 模式明確標示 HTTPS/TLS 限制，不再把 VPN 已啟動誤當成已取得可下載資源。"
