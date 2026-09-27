@@ -126,18 +126,25 @@ class DashDownloadService : Service() {
         val width: Int?,
         val height: Int?,
         val baseUrl: String,
-        val initialization: String,
-        val media: String,
+        val initialization: String?,
+        val media: String?,
+        val explicitInitialization: String?,
+        val explicitSegments: List<String>,
         val startNumber: Long,
         val timescale: Long,
         val segmentDuration: Long?,
         val manifestDurationSeconds: Double?,
         val timeline: List<TimelineEntry>,
     ) {
-        fun initializationUrl(): String =
-            resolve(baseUrl, replaceTemplate(initialization, id, startNumber, 0L))
+        fun initializationUrl(): String? =
+            explicitInitialization?.let { resolve(baseUrl, it) }
+                ?: initialization?.let { resolve(baseUrl, replaceTemplate(it, id, startNumber, 0L)) }
 
         fun segmentUrls(): List<String> {
+            if (explicitSegments.isNotEmpty()) {
+                return explicitSegments.map { resolve(baseUrl, it) }
+            }
+            val mediaTemplate = media ?: return emptyList()
             if (timeline.isNotEmpty()) {
                 val out = mutableListOf<String>()
                 var number = startNumber
@@ -146,7 +153,7 @@ class DashDownloadService : Service() {
                     entry.t?.let { currentTime = it }
                     val count = if (entry.r < 0) 1 else entry.r + 1
                     repeat(count) {
-                        out += resolve(baseUrl, replaceTemplate(media, id, number, currentTime))
+                        out += resolve(baseUrl, replaceTemplate(mediaTemplate, id, number, currentTime))
                         number++
                         currentTime += entry.d
                     }
@@ -160,7 +167,7 @@ class DashDownloadService : Service() {
             return (0 until count).map { index ->
                 val number = startNumber + index
                 val time = index.toLong() * d
-                resolve(baseUrl, replaceTemplate(media, id, number, time))
+                resolve(baseUrl, replaceTemplate(mediaTemplate, id, number, time))
             }
         }
     }
@@ -174,6 +181,11 @@ class DashDownloadService : Service() {
         val timeline: MutableList<TimelineEntry>,
     )
 
+    private data class SegmentListData(
+        var initialization: String? = null,
+        val segments: MutableList<String> = mutableListOf(),
+    )
+
     private data class RepBuilder(
         val kind: TrackKind,
         val id: String,
@@ -183,6 +195,7 @@ class DashDownloadService : Service() {
         val mimeType: String?,
         var baseUrl: String?,
         var template: Template?,
+        var segmentList: SegmentListData?,
     )
 
     private data class Manifest(
@@ -203,7 +216,7 @@ class DashDownloadService : Service() {
         val segmentLists = selected.associateWith { it.segmentUrls() }
         require(segmentLists.values.any { it.isNotEmpty() }) { "此 MPD 的分段格式目前不支援" }
 
-        val total = selected.sumOf { 1 + (segmentLists[it]?.size ?: 0) }
+        val total = selected.sumOf { (if (it.initializationUrl() != null) 1 else 0) + (segmentLists[it]?.size ?: 0) }
         var done = 0
         val tempFiles = mutableListOf<Pair<TrackKind, File>>()
 
@@ -213,9 +226,11 @@ class DashDownloadService : Service() {
                 val suffix = rep.kind.name.lowercase()
                 val temp = File(cacheDir, "dash-${recordId ?: System.currentTimeMillis()}-$suffix.mp4")
                 FileOutputStream(temp).use { output ->
-                    output.write(fetchBytes(rep.initializationUrl(), headers))
-                    done++
-                    updateProgress(recordId, done, total)
+                    rep.initializationUrl()?.let { initUrl ->
+                        output.write(fetchBytes(initUrl, headers))
+                        done++
+                        updateProgress(recordId, done, total)
+                    }
 
                     segmentLists[rep].orEmpty().forEach { segment ->
                         ensureNotCancelled(recordId)
@@ -259,6 +274,7 @@ class DashDownloadService : Service() {
         var adaptationMime: String? = null
         var adaptationBase: String? = null
         var adaptationTemplate: Template? = null
+        var adaptationSegmentList: SegmentListData? = null
         var currentRep: RepBuilder? = null
         var inTimeline = false
         var baseTarget: String? = null
@@ -277,6 +293,7 @@ class DashDownloadService : Service() {
                         )
                         adaptationBase = null
                         adaptationTemplate = null
+                        adaptationSegmentList = null
                     }
                     "Representation" -> {
                         currentRep = RepBuilder(
@@ -288,6 +305,7 @@ class DashDownloadService : Service() {
                             mimeType = parser.getAttributeValue(null, "mimeType") ?: adaptationMime,
                             baseUrl = null,
                             template = null,
+                            segmentList = null,
                         )
                     }
                     "BaseURL" -> baseTarget = if (currentRep != null) "rep" else "adapt"
@@ -301,6 +319,22 @@ class DashDownloadService : Service() {
                             timeline = mutableListOf(),
                         )
                         if (currentRep != null) currentRep?.template = template else adaptationTemplate = template
+                    }
+                    "SegmentList" -> {
+                        val list = SegmentListData()
+                        if (currentRep != null) currentRep?.segmentList = list else adaptationSegmentList = list
+                    }
+                    "Initialization" -> {
+                        val source = parser.getAttributeValue(null, "sourceURL")
+                        if (!source.isNullOrBlank()) {
+                            (currentRep?.segmentList ?: adaptationSegmentList)?.initialization = source
+                        }
+                    }
+                    "SegmentURL" -> {
+                        val media = parser.getAttributeValue(null, "media")
+                        if (!media.isNullOrBlank()) {
+                            (currentRep?.segmentList ?: adaptationSegmentList)?.segments?.add(media)
+                        }
                     }
                     "SegmentTimeline" -> inTimeline = true
                     "S" -> if (inTimeline) {
@@ -333,7 +367,14 @@ class DashDownloadService : Service() {
                     "Representation" -> {
                         val b = currentRep
                         val template = b?.template ?: adaptationTemplate
-                        if (b != null && template?.initialization != null && template.media != null) {
+                        val segmentList = b?.segmentList ?: adaptationSegmentList
+                        if (
+                            b != null &&
+                            (
+                                (template?.initialization != null && template.media != null) ||
+                                    (segmentList != null && segmentList.segments.isNotEmpty())
+                            )
+                        ) {
                             val durationSeconds = periodDuration ?: mpdDuration
                             reps += Representation(
                                 kind = if (b.kind == TrackKind.OTHER) kindFor(null, b.mimeType) else b.kind,
@@ -342,13 +383,15 @@ class DashDownloadService : Service() {
                                 width = b.width,
                                 height = b.height,
                                 baseUrl = resolve(mpdUrl, b.baseUrl ?: adaptationBase ?: "."),
-                                initialization = template.initialization,
-                                media = template.media,
-                                startNumber = template.startNumber,
-                                timescale = template.timescale,
-                                segmentDuration = template.duration,
+                                initialization = template?.initialization,
+                                media = template?.media,
+                                explicitInitialization = segmentList?.initialization,
+                                explicitSegments = segmentList?.segments?.toList().orEmpty(),
+                                startNumber = template?.startNumber ?: 1L,
+                                timescale = template?.timescale ?: 1L,
+                                segmentDuration = template?.duration,
                                 manifestDurationSeconds = durationSeconds,
-                                timeline = template.timeline.toList(),
+                                timeline = template?.timeline?.toList().orEmpty(),
                             )
                         }
                         currentRep = null
