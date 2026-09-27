@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -92,7 +93,11 @@ class OverlayService : Service() {
             textSize = 15f
             gravity = Gravity.CENTER
             setTextColor(0xFFFFFFFF.toInt())
-            setBackgroundResource(android.R.drawable.presence_online)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0xFF005140.toInt())
+                setStroke((1 * density).toInt().coerceAtLeast(1), 0xFF78E6C0.toInt())
+            }
             setPadding(12, 12, 12, 12)
         }
         val params = WindowManager.LayoutParams(
@@ -153,23 +158,29 @@ class OverlayService : Service() {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding((16*density).toInt(), (14*density).toInt(), (16*density).toInt(), (14*density).toInt())
-            setBackgroundColor(0xEE202124.toInt())
+            background = GradientDrawable().apply {
+                cornerRadius = 22 * density
+                setColor(0xF21A201D.toInt())
+                setStroke((1 * density).toInt().coerceAtLeast(1), 0xFF3F4945.toInt())
+            }
         }
 
         val title = TextView(this).apply {
             text = "Meerkat 資源嗅探"
-            setTextColor(0xFFFFFFFF.toInt())
-            textSize = 17f
+            setTextColor(0xFF96F4D5.toInt())
+            textSize = 18f
         }
         val summary = TextView(this).apply {
             tag = "summary"
             text = buildSummary(SnifferRepository.resources.value)
-            setTextColor(0xFFE8EAED.toInt())
+            setTextColor(0xFFBEC9C4.toInt())
             textSize = 14f
             setPadding(0, (8*density).toInt(), 0, (10*density).toInt())
         }
         val open = Button(this).apply {
             text = "查看資源"
+            setTextColor(0xFF00382C.toInt())
+            backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF78E6C0.toInt())
             setOnClickListener {
                 startActivity(
                     Intent(this@OverlayService, MainActivity::class.java)
@@ -180,10 +191,14 @@ class OverlayService : Service() {
         }
         val clear = Button(this).apply {
             text = "清空目前資源"
+            setTextColor(0xFFE0E4E1.toInt())
+            backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF354C43.toInt())
             setOnClickListener { SnifferRepository.clearSession(SessionStore.idOrDefault()) }
         }
         val stop = Button(this).apply {
             text = "停止嗅探"
+            setTextColor(0xFFFFDAD6.toInt())
+            backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF8C1D18.toInt())
             setOnClickListener {
                 startService(
                     Intent(this@OverlayService, SnifferVpnService::class.java).apply {
