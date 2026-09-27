@@ -44,6 +44,9 @@ import com.resourcesniffer.app.core.InstalledApp
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.download.DownloadHelper
+import com.resourcesniffer.app.download.DownloadRecord
+import com.resourcesniffer.app.download.DownloadRegistry
+import com.resourcesniffer.app.download.DownloadState
 import com.resourcesniffer.app.ui.MainViewModel
 import org.json.JSONArray
 
@@ -75,7 +78,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class MainMode { BROWSER, EXTERNAL, RESOURCES }
+private enum class MainMode { BROWSER, EXTERNAL, RESOURCES, DOWNLOADS }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @SuppressLint("SetJavaScriptEnabled")
@@ -86,6 +89,7 @@ private fun MeerkatApp(
 ) {
     val context = LocalContext.current
     val resources by viewModel.resources.collectAsStateWithLifecycle()
+    val downloads by DownloadRegistry.items.collectAsStateWithLifecycle()
     var mode by remember { mutableStateOf(if (incomingUrl != null) MainMode.BROWSER else MainMode.RESOURCES) }
     var address by remember { mutableStateOf(incomingUrl ?: "https://") }
     var webView by remember { mutableStateOf<WebView?>(null) }
@@ -133,18 +137,23 @@ private fun MeerkatApp(
                     SegmentedButton(
                         selected = mode == MainMode.BROWSER,
                         onClick = { mode = MainMode.BROWSER },
-                        shape = SegmentedButtonDefaults.itemShape(0, 3),
+                        shape = SegmentedButtonDefaults.itemShape(0, 4),
                     ) { Text("瀏覽器") }
                     SegmentedButton(
                         selected = mode == MainMode.EXTERNAL,
                         onClick = { mode = MainMode.EXTERNAL },
-                        shape = SegmentedButtonDefaults.itemShape(1, 3),
+                        shape = SegmentedButtonDefaults.itemShape(1, 4),
                     ) { Text("外部 App") }
                     SegmentedButton(
                         selected = mode == MainMode.RESOURCES,
                         onClick = { mode = MainMode.RESOURCES },
-                        shape = SegmentedButtonDefaults.itemShape(2, 3),
+                        shape = SegmentedButtonDefaults.itemShape(2, 4),
                     ) { Text("資源") }
+                    SegmentedButton(
+                        selected = mode == MainMode.DOWNLOADS,
+                        onClick = { mode = MainMode.DOWNLOADS },
+                        shape = SegmentedButtonDefaults.itemShape(3, 4),
+                    ) { Text("下載") }
                 }
 
                 when (mode) {
@@ -198,6 +207,7 @@ private fun MeerkatApp(
                             }
                         },
                     )
+                    MainMode.DOWNLOADS -> DownloadsPane(downloads)
                 }
             }
         }
@@ -495,6 +505,56 @@ private fun ResourceRow(resource: Resource) {
             }
         }
     }
+}
+
+@Composable
+private fun DownloadsPane(downloads: List<DownloadRecord>) {
+    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("下載管理", fontWeight = FontWeight.SemiBold)
+            OutlinedButton(onClick = { DownloadRegistry.clearCompleted() }) {
+                Text("清除已結束")
+            }
+        }
+
+        if (downloads.isEmpty()) {
+            Text("目前沒有下載任務。", style = MaterialTheme.typography.bodySmall)
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(downloads, key = { it.id }) { item ->
+                    ElevatedCard(Modifier.fillMaxWidth()) {
+                        Column(
+                            Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(item.displayName, fontWeight = FontWeight.SemiBold)
+                            Text(downloadStateLabel(item.state), style = MaterialTheme.typography.bodySmall)
+                            item.detail?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
+                            item.progress?.let { progress ->
+                                LinearProgressIndicator(
+                                    progress = { progress / 100f },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                                Text("$progress%", style = MaterialTheme.typography.labelSmall)
+                            }
+                            Text(item.url, style = MaterialTheme.typography.labelSmall, maxLines = 2)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun downloadStateLabel(state: DownloadState): String = when (state) {
+    DownloadState.QUEUED -> "等待中"
+    DownloadState.DOWNLOADING -> "下載中"
+    DownloadState.COMPLETED -> "已完成"
+    DownloadState.FAILED -> "失敗"
+    DownloadState.CANCELLED -> "已取消"
 }
 
 private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
