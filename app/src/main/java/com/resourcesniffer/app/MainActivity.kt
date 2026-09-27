@@ -512,7 +512,7 @@ private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
 
     webView.evaluateJavascript(script) { raw ->
         runCatching {
-            val jsonText = if (raw.startsWith(""")) {
+            val jsonText = if (raw.startsWith("\"")) {
                 org.json.JSONTokener(raw).nextValue() as String
             } else raw
             val array = JSONArray(jsonText)
