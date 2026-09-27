@@ -25,6 +25,7 @@ import com.resourcesniffer.app.R
 import com.resourcesniffer.app.capture.SnifferVpnService
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.repository.SnifferRepository
+import com.resourcesniffer.app.repository.SessionStore
 
 class OverlayService : Service() {
     companion object {
@@ -179,7 +180,7 @@ class OverlayService : Service() {
         }
         val clear = Button(this).apply {
             text = "清空目前資源"
-            setOnClickListener { SnifferRepository.clear() }
+            setOnClickListener { SnifferRepository.clearSession(SessionStore.idOrDefault()) }
         }
         val stop = Button(this).apply {
             text = "停止嗅探"
