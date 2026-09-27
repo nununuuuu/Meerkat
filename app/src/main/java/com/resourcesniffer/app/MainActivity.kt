@@ -14,6 +14,9 @@ import android.os.Bundle
 import android.provider.Settings
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
@@ -105,7 +108,7 @@ private fun MeerkatApp(
     val downloads by DownloadRegistry.items.collectAsStateWithLifecycle()
     val currentSession by viewModel.currentSession.collectAsStateWithLifecycle()
     var mode by remember { mutableStateOf(if (incomingUrl != null) MainMode.BROWSER else MainMode.RESOURCES) }
-    var address by remember { mutableStateOf(incomingUrl ?: "https://") }
+    var address by remember { mutableStateOf(incomingUrl ?: "https://www.google.com/") }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var selectedPackage by remember { mutableStateOf<String?>(null) }
     var externalCaptureActive by remember { mutableStateOf(false) }
@@ -261,14 +264,25 @@ private fun BrowserPane(
 ) {
     var localAddress by remember(address) { mutableStateOf(address) }
     var webView by remember { mutableStateOf<WebView?>(null) }
+    var loading by remember { mutableStateOf(false) }
+    var progress by remember { mutableIntStateOf(0) }
+    var pageError by remember { mutableStateOf<String?>(null) }
 
-    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(
+        Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         Text(
-            "此模式可保留網站登入狀態，適合抓取 HTTPS 圖片、影片、文件與串流網址。",
+            "內建瀏覽器可直接看到 HTTPS 資源請求，登入網站後可用「掃描目前頁面」補抓動態資源。",
             style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             OutlinedTextField(
                 value = localAddress,
                 onValueChange = {
@@ -283,11 +297,16 @@ private fun BrowserPane(
                 val url = normalizeUrl(localAddress)
                 localAddress = url
                 onAddressChange(url)
+                pageError = null
                 webView?.loadUrl(url)
             }) { Text("開啟") }
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             IconButton(onClick = { webView?.goBack() }, enabled = webView?.canGoBack() == true) {
                 Icon(Icons.Default.ArrowBack, "上一頁")
             }
@@ -302,20 +321,70 @@ private fun BrowserPane(
             }
         }
 
+        if (loading) {
+            LinearProgressIndicator(
+                progress = { (progress.coerceIn(0, 100)) / 100f },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        pageError?.let { error ->
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.errorContainer,
+                shape = MaterialTheme.shapes.medium,
+            ) {
+                Text(
+                    text = error,
+                    modifier = Modifier.padding(10.dp),
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+
         AndroidView(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
             factory = { ctx ->
                 WebView(ctx).apply {
                     webView = this
                     onWebViewReady(this)
+                    setBackgroundColor(android.graphics.Color.WHITE)
+
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.databaseEnabled = true
                     settings.mediaPlaybackRequiresUserGesture = false
+                    settings.loadsImagesAutomatically = true
+                    settings.blockNetworkImage = false
+                    settings.useWideViewPort = true
+                    settings.loadWithOverviewMode = false
+                    settings.builtInZoomControls = true
+                    settings.displayZoomControls = false
+                    settings.javaScriptCanOpenWindowsAutomatically = true
+                    settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                            progress = newProgress
+                            loading = newProgress < 100
+                            super.onProgressChanged(view, newProgress)
+                        }
+                    }
+
                     webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                        ): Boolean {
+                            return false
+                        }
+
                         override fun shouldInterceptRequest(
                             view: WebView?,
                             request: WebResourceRequest?,
@@ -331,7 +400,30 @@ private fun BrowserPane(
                             return null
                         }
 
+                        override fun onPageStarted(
+                            view: WebView?,
+                            url: String?,
+                            favicon: android.graphics.Bitmap?,
+                        ) {
+                            loading = true
+                            pageError = null
+                            super.onPageStarted(view, url, favicon)
+                        }
+
+                        override fun onReceivedError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            error: WebResourceError?,
+                        ) {
+                            if (request?.isForMainFrame == true) {
+                                pageError = "網頁載入失敗：${error?.description ?: "未知錯誤"}"
+                                loading = false
+                            }
+                            super.onReceivedError(view, request, error)
+                        }
+
                         override fun onPageFinished(view: WebView?, url: String?) {
+                            loading = false
                             url?.let {
                                 localAddress = it
                                 onAddressChange(it)
@@ -341,13 +433,13 @@ private fun BrowserPane(
                         }
                     }
 
-                    setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+                    setDownloadListener { url, userAgent, _, mimeType, _ ->
                         if (!url.isNullOrBlank()) {
                             viewModel.recordWebResource(
                                 url = url,
                                 mimeType = mimeType,
                                 requestHeaders = mapOf(
-                                    "User-Agent" to (userAgent ?: ""),
+                                    "User-Agent" to (userAgent ?: settings.userAgentString.orEmpty()),
                                     "Referer" to (this.url ?: ""),
                                     "Cookie" to (CookieManager.getInstance().getCookie(url) ?: ""),
                                 ),
@@ -355,8 +447,12 @@ private fun BrowserPane(
                         }
                     }
 
-                    if (localAddress != "https://") loadUrl(normalizeUrl(localAddress))
+                    loadUrl(normalizeUrl(localAddress))
                 }
+            },
+            update = { view ->
+                webView = view
+                onWebViewReady(view)
             },
         )
     }
