@@ -19,6 +19,13 @@ object DownloadRegistry {
         _items.value = _items.value.map { if (it.id == id) transform(it) else it }
     }
 
+    fun find(id: String): DownloadRecord? = _items.value.firstOrNull { it.id == id }
+
+    @Synchronized
+    fun cancel(id: String) {
+        update(id) { it.copy(state = DownloadState.CANCELLED, detail = "已取消") }
+    }
+
     @Synchronized
     fun clearCompleted() {
         _items.value = _items.value.filterNot {
