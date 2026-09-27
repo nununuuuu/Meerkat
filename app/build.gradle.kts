@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.resourcesniffer.app"
-        minSdk = 26
+        minSdk = 29
         targetSdk = 36
         versionCode = 3
         versionName = "0.3.0"
