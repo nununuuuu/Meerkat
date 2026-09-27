@@ -41,7 +41,10 @@ class OverlayService : Service() {
 
     private val updateCount = object : Runnable {
         override fun run() {
-            val items = SnifferRepository.resources.value
+            val sessionId = SessionStore.idOrDefault()
+            val items = SnifferRepository.resources.value.filter {
+                sessionId == 0L || it.sessionId == sessionId
+            }
             bubble?.text = items.size.toString()
             panel?.findViewWithTag<TextView>("summary")?.text = buildSummary(items)
             handler.postDelayed(this, 700)
@@ -89,7 +92,10 @@ class OverlayService : Service() {
         val density = resources.displayMetrics.density
         val size = (58 * density).toInt()
         val view = TextView(this).apply {
-            text = SnifferRepository.resources.value.size.toString()
+            text = SnifferRepository.resources.value.count {
+                val sessionId = SessionStore.idOrDefault()
+                sessionId == 0L || it.sessionId == sessionId
+            }.toString()
             textSize = 15f
             gravity = Gravity.CENTER
             setTextColor(0xFFFFFFFF.toInt())
@@ -172,7 +178,12 @@ class OverlayService : Service() {
         }
         val summary = TextView(this).apply {
             tag = "summary"
-            text = buildSummary(SnifferRepository.resources.value)
+            text = buildSummary(
+                SnifferRepository.resources.value.filter {
+                    val sessionId = SessionStore.idOrDefault()
+                    sessionId == 0L || it.sessionId == sessionId
+                }
+            )
             setTextColor(0xFFBEC9C4.toInt())
             textSize = 14f
             setPadding(0, (8*density).toInt(), 0, (10*density).toInt())
@@ -238,6 +249,9 @@ class OverlayService : Service() {
 
     private fun buildSummary(items: List<com.resourcesniffer.app.core.Resource>): String {
         fun count(type: ResourceType) = items.count { it.type == type }
+        if (items.isEmpty()) {
+            return "本次尚未取得可下載資源\nHTTPS App 通常無法從加密流量取得完整 URL"
+        }
         return "圖片 ${count(ResourceType.IMAGE)}　影片 ${count(ResourceType.VIDEO)}\n" +
             "音訊 ${count(ResourceType.AUDIO)}　串流 ${count(ResourceType.STREAM)}\n" +
             "文件 ${count(ResourceType.DOCUMENT)}　總計 ${items.size}"
