@@ -42,7 +42,7 @@ class DashDownloadService : Service() {
                 .replace("\$RepresentationID\$", id)
                 .replace("\$Number\$", number.toString())
                 .replace("\$Time\$", time.toString())
-                .replace(Regex("""\$Number%0(\d+)d\$""")) { match ->
+                .replace(Regex("""[$]Number%0(\\d+)d[$]""")) { match ->
                     number.toString().padStart(match.groupValues[1].toInt(), '0')
                 }
     }
