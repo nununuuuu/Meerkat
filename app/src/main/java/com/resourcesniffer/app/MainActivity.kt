@@ -90,6 +90,7 @@ private fun MeerkatApp(
     val context = LocalContext.current
     val resources by viewModel.resources.collectAsStateWithLifecycle()
     val downloads by DownloadRegistry.items.collectAsStateWithLifecycle()
+    val currentSession by viewModel.currentSession.collectAsStateWithLifecycle()
     var mode by remember { mutableStateOf(if (incomingUrl != null) MainMode.BROWSER else MainMode.RESOURCES) }
     var address by remember { mutableStateOf(incomingUrl ?: "https://") }
     var webView by remember { mutableStateOf<WebView?>(null) }
@@ -193,6 +194,7 @@ private fun MeerkatApp(
                     )
                     MainMode.RESOURCES -> ResourcePane(
                         resources = resources,
+                        currentSessionId = currentSession?.id,
                         onClear = viewModel::clear,
                         onEnableOverlay = {
                             if (!Settings.canDrawOverlays(context)) {
@@ -397,15 +399,18 @@ private fun ExternalAppPane(
 @Composable
 private fun ResourcePane(
     resources: List<Resource>,
+    currentSessionId: Long?,
     onClear: () -> Unit,
     onEnableOverlay: () -> Unit,
 ) {
     var selectedType by remember { mutableStateOf<ResourceType?>(null) }
     var query by remember { mutableStateOf("") }
+    var currentOnly by remember { mutableStateOf(true) }
 
-    val visible = remember(resources, selectedType, query) {
+    val visible = remember(resources, selectedType, query, currentOnly, currentSessionId) {
         resources.filter { resource ->
-            (selectedType == null || resource.type == selectedType) &&
+            (!currentOnly || currentSessionId == null || resource.sessionId == currentSessionId) &&
+                (selectedType == null || resource.type == selectedType) &&
                 (query.isBlank() ||
                     resource.url.orEmpty().contains(query, true) ||
                     resource.host.contains(query, true))
@@ -414,6 +419,11 @@ private fun ResourcePane(
 
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                selected = currentOnly,
+                onClick = { currentOnly = !currentOnly },
+                label = { Text(if (currentOnly) "本次嗅探" else "全部歷史") },
+            )
             OutlinedButton(onClick = onClear) {
                 Icon(Icons.Default.Delete, null)
                 Spacer(Modifier.width(4.dp))
