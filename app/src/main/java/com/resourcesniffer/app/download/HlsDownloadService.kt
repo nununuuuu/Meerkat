@@ -115,18 +115,25 @@ class HlsDownloadService : Service() {
         val parsed = parseMediaPlaylist(manifest, playlistUrl)
         require(parsed.segments.isNotEmpty()) { "找不到可下載的 HLS 分段" }
 
-        val extension = if (parsed.initSegment != null || parsed.segments.any { it.url.contains(".m4s", true) }) "mp4" else "ts"
+        val extension = if (parsed.segments.any { it.init != null || it.url.contains(".m4s", true) }) "mp4" else "ts"
         val outputName = "Meerkat-${System.currentTimeMillis()}.$extension"
 
         val target = openOutput(outputName)
         target.stream.use { output ->
-            parsed.initSegment?.let { init -> output.write(fetchBytes(init, headers)) }
+            var lastInit: RangedResource? = null
 
             parsed.segments.forEachIndexed { index, segment ->
                 if (recordId != null && DownloadRegistry.find(recordId)?.state == DownloadState.CANCELLED) {
                     error("下載已取消")
                 }
-                var bytes = fetchBytes(segment.url, headers)
+                segment.init?.let { init ->
+                    if (init != lastInit) {
+                        output.write(fetchBytes(init.url, headers, init.range))
+                        lastInit = init
+                    }
+                }
+
+                var bytes = fetchBytes(segment.url, headers, segment.range)
                 val key = segment.key
                 if (key != null && key.method.equals("AES-128", true)) {
                     val keyBytes = fetchBytes(key.uri, headers)
@@ -173,13 +180,23 @@ class HlsDownloadService : Service() {
     }
 
     private data class HlsKey(val method: String, val uri: String, val iv: ByteArray?)
-    private data class Segment(val url: String, val sequence: Long, val key: HlsKey?)
-    private data class Playlist(val initSegment: String?, val segments: List<Segment>)
+    private data class ByteRange(val start: Long, val length: Long)
+    private data class RangedResource(val url: String, val range: ByteRange?)
+    private data class Segment(
+        val url: String,
+        val sequence: Long,
+        val key: HlsKey?,
+        val range: ByteRange?,
+        val init: RangedResource?,
+    )
+    private data class Playlist(val segments: List<Segment>)
 
     private fun parseMediaPlaylist(manifest: String, baseUrl: String): Playlist {
         var sequence = 0L
         var currentKey: HlsKey? = null
-        var initSegment: String? = null
+        var currentInit: RangedResource? = null
+        var pendingRangeSpec: String? = null
+        val previousEndByUrl = mutableMapOf<String, Long>()
         val segments = mutableListOf<Segment>()
 
         manifest.lineSequence().map { it.trim() }.forEach { line ->
@@ -187,9 +204,21 @@ class HlsDownloadService : Service() {
                 line.startsWith("#EXT-X-MEDIA-SEQUENCE:", true) -> {
                     sequence = line.substringAfter(':').trim().toLongOrNull() ?: sequence
                 }
+
                 line.startsWith("#EXT-X-MAP:", true) -> {
-                    attribute(line.substringAfter(':'), "URI")?.let { initSegment = resolve(baseUrl, it) }
+                    val attrs = line.substringAfter(':')
+                    val uri = attribute(attrs, "URI") ?: return@forEach
+                    val url = resolve(baseUrl, uri)
+                    val range = attribute(attrs, "BYTERANGE")?.let {
+                        parseByteRange(it, url, previousEndByUrl)
+                    }
+                    currentInit = RangedResource(url, range)
                 }
+
+                line.startsWith("#EXT-X-BYTERANGE:", true) -> {
+                    pendingRangeSpec = line.substringAfter(':').trim()
+                }
+
                 line.startsWith("#EXT-X-KEY:", true) -> {
                     val attrs = line.substringAfter(':')
                     val method = attribute(attrs, "METHOD") ?: "NONE"
@@ -205,13 +234,41 @@ class HlsDownloadService : Service() {
                         }
                     }
                 }
+
+                line.startsWith("#EXT-X-DISCONTINUITY", true) -> Unit
+
                 line.isNotBlank() && !line.startsWith("#") -> {
-                    segments += Segment(resolve(baseUrl, line), sequence, currentKey)
+                    val url = resolve(baseUrl, line)
+                    val range = pendingRangeSpec?.let {
+                        parseByteRange(it, url, previousEndByUrl)
+                    }
+                    pendingRangeSpec = null
+                    segments += Segment(
+                        url = url,
+                        sequence = sequence,
+                        key = currentKey,
+                        range = range,
+                        init = currentInit,
+                    )
                     sequence++
                 }
             }
         }
-        return Playlist(initSegment, segments)
+        return Playlist(segments)
+    }
+
+    private fun parseByteRange(
+        spec: String,
+        url: String,
+        previousEndByUrl: MutableMap<String, Long>,
+    ): ByteRange? {
+        val clean = spec.trim().trim('"')
+        val length = clean.substringBefore('@').toLongOrNull() ?: return null
+        if (length <= 0) return null
+        val explicit = clean.substringAfter('@', "").takeIf { it.isNotBlank() }?.toLongOrNull()
+        val start = explicit ?: previousEndByUrl[url] ?: 0L
+        previousEndByUrl[url] = start + length
+        return ByteRange(start, length)
     }
 
     private fun attribute(attrs: String, name: String): String? {
@@ -227,12 +284,22 @@ class HlsDownloadService : Service() {
     private fun fetchText(url: String, headers: Map<String, String>): String =
         fetchBytes(url, headers).toString(Charsets.UTF_8)
 
-    private fun fetchBytes(url: String, headers: Map<String, String>): ByteArray {
+    private fun fetchBytes(
+        url: String,
+        headers: Map<String, String>,
+        range: ByteRange? = null,
+    ): ByteArray {
         val connection = URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout = 15_000
         connection.readTimeout = 30_000
         connection.instanceFollowRedirects = true
         headers.forEach { (key, value) -> connection.setRequestProperty(key, value) }
+        range?.let {
+            val end = it.start + it.length - 1
+            connection.setRequestProperty("Range", "bytes=${it.start}-$end")
+        }
+        val code = connection.responseCode
+        require(code in 200..299) { "HTTP $code：$url" }
         connection.inputStream.use { return it.readBytes() }
     }
 
