@@ -168,22 +168,77 @@ class HlsDownloadService : Service() {
         }
     }
 
+    private data class MasterVariant(
+        val url: String,
+        val bandwidth: Long,
+        val resolution: String?,
+        val audioGroup: String?,
+        val subtitleGroup: String?,
+    )
+
+    private data class MasterMedia(
+        val type: String,
+        val groupId: String?,
+        val name: String?,
+        val language: String?,
+        val default: Boolean,
+        val uri: String?,
+    )
+
+    private data class MasterPlaylist(
+        val variants: List<MasterVariant>,
+        val media: List<MasterMedia>,
+    )
+
     private fun chooseHighestVariant(manifest: String, baseUrl: String): String? {
+        val master = parseMasterPlaylist(manifest, baseUrl)
+        val best = master.variants.maxWithOrNull(
+            compareBy<MasterVariant> {
+                it.resolution
+                    ?.substringAfter('x', "")
+                    ?.toIntOrNull()
+                    ?: 0
+            }.thenBy { it.bandwidth }
+        )
+        return best?.url
+    }
+
+    private fun parseMasterPlaylist(manifest: String, baseUrl: String): MasterPlaylist {
         val lines = manifest.lineSequence().map { it.trim() }.toList()
-        var bestBandwidth = -1L
-        var bestUrl: String? = null
+        val variants = mutableListOf<MasterVariant>()
+        val media = mutableListOf<MasterMedia>()
+
         for (i in lines.indices) {
             val line = lines[i]
-            if (!line.startsWith("#EXT-X-STREAM-INF:", true)) continue
-            val bandwidth = Regex("""(?:^|,)BANDWIDTH=(\d+)""", RegexOption.IGNORE_CASE)
-                .find(line.substringAfter(':'))?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 0L
-            val next = lines.drop(i + 1).firstOrNull { it.isNotBlank() && !it.startsWith("#") } ?: continue
-            if (bandwidth > bestBandwidth) {
-                bestBandwidth = bandwidth
-                bestUrl = resolve(baseUrl, next)
+            when {
+                line.startsWith("#EXT-X-STREAM-INF:", true) -> {
+                    val attrs = line.substringAfter(':')
+                    val next = lines.drop(i + 1)
+                        .firstOrNull { it.isNotBlank() && !it.startsWith("#") }
+                        ?: continue
+                    variants += MasterVariant(
+                        url = resolve(baseUrl, next),
+                        bandwidth = attribute(attrs, "BANDWIDTH")?.toLongOrNull() ?: 0L,
+                        resolution = attribute(attrs, "RESOLUTION"),
+                        audioGroup = attribute(attrs, "AUDIO"),
+                        subtitleGroup = attribute(attrs, "SUBTITLES"),
+                    )
+                }
+
+                line.startsWith("#EXT-X-MEDIA:", true) -> {
+                    val attrs = line.substringAfter(':')
+                    media += MasterMedia(
+                        type = attribute(attrs, "TYPE").orEmpty(),
+                        groupId = attribute(attrs, "GROUP-ID"),
+                        name = attribute(attrs, "NAME"),
+                        language = attribute(attrs, "LANGUAGE"),
+                        default = attribute(attrs, "DEFAULT").equals("YES", true),
+                        uri = attribute(attrs, "URI")?.let { resolve(baseUrl, it) },
+                    )
+                }
             }
         }
-        return bestUrl
+        return MasterPlaylist(variants, media)
     }
 
     private data class HlsKey(val method: String, val uri: String, val iv: ByteArray?)
