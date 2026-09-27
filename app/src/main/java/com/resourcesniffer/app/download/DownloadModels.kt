@@ -2,6 +2,8 @@ package com.resourcesniffer.app.download
 
 import com.resourcesniffer.app.core.StreamType
 
+enum class DownloadQuality { HIGH, LOW }
+
 enum class DownloadState {
     QUEUED, DOWNLOADING, COMPLETED, FAILED, CANCELLED
 }
@@ -15,6 +17,7 @@ data class DownloadRecord(
     val cookie: String?,
     val referer: String?,
     val userAgent: String?,
+    val quality: DownloadQuality = DownloadQuality.HIGH,
     val state: DownloadState,
     val progress: Int? = null,
     val detail: String? = null,
