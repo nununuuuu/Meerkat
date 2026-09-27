@@ -519,6 +519,7 @@ private fun ResourceRow(resource: Resource) {
 
 @Composable
 private fun DownloadsPane(downloads: List<DownloadRecord>) {
+    val context = LocalContext.current
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text("下載管理", fontWeight = FontWeight.SemiBold)
@@ -551,6 +552,23 @@ private fun DownloadsPane(downloads: List<DownloadRecord>) {
                                 Text("$progress%", style = MaterialTheme.typography.labelSmall)
                             }
                             Text(item.url, style = MaterialTheme.typography.labelSmall, maxLines = 2)
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (item.state == DownloadState.QUEUED || item.state == DownloadState.DOWNLOADING) {
+                                    OutlinedButton(onClick = {
+                                        DownloadHelper.cancel(context, item)
+                                    }) {
+                                        Text("取消")
+                                    }
+                                }
+                                if (item.state == DownloadState.FAILED || item.state == DownloadState.CANCELLED) {
+                                    Button(onClick = {
+                                        DownloadHelper.retry(context, item)
+                                    }) {
+                                        Text("重試")
+                                    }
+                                }
+                            }
                         }
                     }
                 }
