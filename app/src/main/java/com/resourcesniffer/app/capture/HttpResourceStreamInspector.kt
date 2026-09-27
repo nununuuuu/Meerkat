@@ -5,6 +5,7 @@ import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceClassifier
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.repository.SnifferRepository
+import com.resourcesniffer.app.repository.SessionStore
 import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicLong
 
