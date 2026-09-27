@@ -15,7 +15,11 @@ import java.util.UUID
 
 object DownloadHelper {
 
-    fun enqueue(context: Context, resource: Resource) {
+    fun enqueue(
+        context: Context,
+        resource: Resource,
+        quality: DownloadQuality = DownloadQuality.HIGH,
+    ) {
         val url = resource.url ?: error("缺少資源網址")
         val cookie = resource.cookie ?: CookieManager.getInstance().getCookie(url)
         val record = DownloadRecord(
@@ -28,6 +32,7 @@ object DownloadHelper {
             cookie = cookie,
             referer = resource.referer,
             userAgent = resource.userAgent,
+            quality = quality,
             state = DownloadState.QUEUED,
             detail = "等待下載",
         )
@@ -68,6 +73,7 @@ object DownloadHelper {
                         putExtra(HlsDownloadService.EXTRA_COOKIE, record.cookie)
                         putExtra(HlsDownloadService.EXTRA_REFERER, record.referer)
                         putExtra(HlsDownloadService.EXTRA_USER_AGENT, record.userAgent)
+                    putExtra(HlsDownloadService.EXTRA_QUALITY, record.quality.name)
                     }
                 )
             }
@@ -81,6 +87,7 @@ object DownloadHelper {
                         putExtra(DashDownloadService.EXTRA_COOKIE, record.cookie)
                         putExtra(DashDownloadService.EXTRA_REFERER, record.referer)
                         putExtra(DashDownloadService.EXTRA_USER_AGENT, record.userAgent)
+                    putExtra(DashDownloadService.EXTRA_QUALITY, record.quality.name)
                     }
                 )
             }
