@@ -14,10 +14,12 @@ import com.resourcesniffer.app.core.ResourceClassifier
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.overlay.OverlayService
 import com.resourcesniffer.app.repository.SnifferRepository
+import com.resourcesniffer.app.repository.SessionStore
 import java.util.concurrent.atomic.AtomicLong
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     val resources = SnifferRepository.resources
+    val currentSession = SessionStore.current
     private val ids = AtomicLong(System.currentTimeMillis())
 
     fun recordWebResource(
@@ -34,10 +36,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ?.lowercase()
             ?.takeIf { it.isNotBlank() }
 
+        val session = SessionStore.ensureBrowserSession()
         SnifferRepository.add(
             Resource(
                 id = ids.getAndIncrement(),
-                sessionId = 1,
+                sessionId = session.id,
                 sourceAppPackage = null,
                 sourceAppName = "內建瀏覽器",
                 url = url,
@@ -80,6 +83,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startExternalCapture(packageName: String) {
         val context = getApplication<Application>()
+        val pm = context.packageManager
+        val appName = runCatching {
+            pm.getApplicationLabel(pm.getApplicationInfo(packageName, 0)).toString()
+        }.getOrNull()
+        SessionStore.start(packageName, appName)
         ContextCompat.startForegroundService(
             context,
             Intent(context, SnifferVpnService::class.java).apply {
@@ -95,6 +103,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopExternalCapture() {
         val context = getApplication<Application>()
+        SessionStore.stop()
         context.startService(
             Intent(context, SnifferVpnService::class.java).apply {
                 action = SnifferVpnService.ACTION_STOP
@@ -108,4 +117,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clear() = SnifferRepository.clear()
+
+    fun clearCurrentSession() = SnifferRepository.clearSession(SessionStore.idOrDefault())
 }
