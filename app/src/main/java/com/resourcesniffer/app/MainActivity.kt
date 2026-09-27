@@ -477,14 +477,27 @@ private fun ExternalAppPane(
     }
 
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(
-            "選擇一個 App 後，只有該 App 會走 Meerkat 的本機 VPN。TCP/UDP 會正常轉送，不會像舊版一樣斷網。資源列表只顯示辨識出的檔案，不顯示一般連線。",
-            style = MaterialTheme.typography.bodySmall,
-        )
-        Text(
-            "HTTPS 若使用一般 TLS，加密層外無法取得完整 path；需要完整網址時請使用內建瀏覽器/分享網址模式。憑證釘選或 DRM 內容不會嘗試繞過。",
-            style = MaterialTheme.typography.bodySmall,
-        )
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surfaceVariant,
+        ) {
+            Column(
+                Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text("外部 App 相容嗅探", fontWeight = FontWeight.SemiBold)
+                Text(
+                    "這個模式會把你選定 App 的流量正常轉送；只有能看見完整 HTTP URL 的請求才能直接辨識成可下載資源。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    "多數 App 使用 HTTPS，完整資源路徑位於 TLS 加密內，因此可能顯示 0。若 App 可分享文章/頁面網址，請分享至 Meerkat 後用內建瀏覽器抓取 HTTPS 資源。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
 
         OutlinedTextField(
             value = query,
@@ -496,7 +509,7 @@ private fun ExternalAppPane(
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onStart, enabled = !captureActive && selectedPackage != null) {
-                Text("開始嗅探")
+                Text("啟動相容嗅探")
             }
             OutlinedButton(onClick = onStop, enabled = captureActive) {
                 Text("停止")
