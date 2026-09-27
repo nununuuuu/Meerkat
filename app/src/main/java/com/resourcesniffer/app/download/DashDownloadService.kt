@@ -468,12 +468,29 @@ class DashDownloadService : Service() {
         fetchBytes(url, headers).toString(Charsets.UTF_8)
 
     private fun fetchBytes(url: String, headers: Map<String, String>): ByteArray {
-        val connection = URL(url).openConnection() as HttpURLConnection
-        connection.connectTimeout = 15_000
-        connection.readTimeout = 30_000
-        connection.instanceFollowRedirects = true
-        headers.forEach { (key, value) -> connection.setRequestProperty(key, value) }
-        connection.inputStream.use { return it.readBytes() }
+        var lastError: Throwable? = null
+        repeat(3) { attempt ->
+            val connection = URL(url).openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = 15_000
+                connection.readTimeout = 30_000
+                connection.instanceFollowRedirects = true
+                headers.forEach { (key, value) -> connection.setRequestProperty(key, value) }
+                val code = connection.responseCode
+                if (code in 200..299) {
+                    connection.inputStream.use { return it.readBytes() }
+                }
+                val retryable = code == 408 || code == 429 || code in 500..599
+                if (!retryable) error("HTTP $code：$url")
+                lastError = IllegalStateException("HTTP $code：$url")
+            } catch (error: Throwable) {
+                lastError = error
+            } finally {
+                connection.disconnect()
+            }
+            if (attempt < 2) Thread.sleep(400L * (attempt + 1))
+        }
+        throw lastError ?: IllegalStateException("下載失敗：$url")
     }
 
     private fun notifyDone(text: String) {
