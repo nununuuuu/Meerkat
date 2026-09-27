@@ -63,6 +63,14 @@ object SnifferRepository {
             ?.edit()?.remove(KEY_HISTORY)?.apply()
     }
 
+    @Synchronized
+    fun clearSession(sessionId: Long) {
+        if (sessionId == 0L) return
+        val kept = _resources.value.filterNot { it.sessionId == sessionId }
+        _resources.value = kept
+        persistHistory(kept)
+    }
+
     private fun persistHistory(resources: List<Resource>) {
         val context = appContext ?: return
         val array = JSONArray()
