@@ -72,11 +72,6 @@ class SnifferVpnService : VpnService() {
         try {
             engine.start(fd, 1500)
         } catch (_: Throwable) {
-            runCatching { android.system.Os.close(java.io.FileDescriptor().apply {
-                // fd ownership is handed to the native bridge on successful start.
-                // If startup fails before that point, service teardown handles the
-                // process-level descriptor cleanup.
-            }) }
             stopCapture()
         }
     }
