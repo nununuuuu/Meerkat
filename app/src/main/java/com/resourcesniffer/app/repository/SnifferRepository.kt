@@ -1,6 +1,7 @@
 package com.resourcesniffer.app.repository
 
 import android.content.Context
+import android.net.Uri
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.core.StreamType
@@ -30,8 +31,9 @@ object SnifferRepository {
     @Synchronized
     fun add(resource: Resource) {
         val current = _resources.value
+        val resourceKey = canonicalKey(resource.url)
         val existing = current.indexOfFirst {
-            it.url == resource.url &&
+            canonicalKey(it.url) == resourceKey &&
                 it.type == resource.type &&
                 it.sourceAppPackage == resource.sourceAppPackage
         }
@@ -74,6 +76,29 @@ object SnifferRepository {
         val kept = _resources.value.filterNot { it.sessionId == sessionId }
         _resources.value = kept
         persistHistory(kept)
+    }
+
+    private fun canonicalKey(url: String?): String? {
+        if (url.isNullOrBlank()) return url
+        val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return url
+        val builder = uri.buildUpon().clearQuery()
+        val stableNames = runCatching { uri.queryParameterNames }.getOrDefault(emptySet())
+        stableNames
+            .filterNot { key ->
+                val k = key.lowercase()
+                k in setOf(
+                    "token", "sig", "signature", "expires", "expiry", "auth", "auth_key",
+                    "policy", "key-pair-id", "x-amz-signature", "x-amz-credential",
+                    "x-amz-date", "x-amz-expires", "x-amz-security-token"
+                ) || k.startsWith("utm_")
+            }
+            .sorted()
+            .forEach { key ->
+                uri.getQueryParameters(key).forEach { value ->
+                    builder.appendQueryParameter(key, value)
+                }
+            }
+        return builder.build().toString()
     }
 
     private fun persistHistory(resources: List<Resource>) {
