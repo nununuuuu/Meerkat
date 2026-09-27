@@ -37,8 +37,8 @@ class OverlayService : Service() {
             NOTIFICATION_ID,
             NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_menu_view)
-                .setContentTitle("Resource Sniffer")
-                .setContentText("Floating control active")
+                .setContentTitle("Meerkat 資源嗅探")
+                .setContentText("懸浮控制已啟用")
                 .setOngoing(true)
                 .build()
         )
@@ -48,7 +48,7 @@ class OverlayService : Service() {
     private fun showBubble() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val view = TextView(this).apply {
-            text = "0"
+            text = "M"
             textSize = 16f
             gravity = Gravity.CENTER
             setTextColor(0xFFFFFFFF.toInt())
