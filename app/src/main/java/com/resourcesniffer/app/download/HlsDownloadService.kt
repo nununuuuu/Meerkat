@@ -26,6 +26,7 @@ class HlsDownloadService : Service() {
     companion object {
         private const val CHANNEL_ID = "hls_download"
         private const val NOTIFICATION_ID = 2101
+        const val EXTRA_RECORD_ID = "record_id"
         const val EXTRA_URL = "url"
         const val EXTRA_COOKIE = "cookie"
         const val EXTRA_REFERER = "referer"
@@ -40,9 +41,15 @@ class HlsDownloadService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val recordId = intent?.getStringExtra(EXTRA_RECORD_ID)
         val url = intent?.getStringExtra(EXTRA_URL) ?: run {
             stopSelf(startId)
             return START_NOT_STICKY
+        }
+        if (recordId != null) {
+            DownloadRegistry.update(recordId) {
+                it.copy(state = DownloadState.DOWNLOADING, detail = "正在解析 HLS", progress = 0)
+            }
         }
         val headers = buildMap {
             intent.getStringExtra(EXTRA_COOKIE)?.takeIf { it.isNotBlank() }?.let { put("Cookie", it) }
@@ -62,9 +69,23 @@ class HlsDownloadService : Service() {
         )
 
         executor.execute {
-            runCatching { downloadHls(url, headers) }
-                .onSuccess { notifyDone("串流下載完成") }
-                .onFailure { notifyDone("串流下載失敗：${it.message ?: "未知錯誤"}") }
+            runCatching { downloadHls(url, headers, recordId) }
+                .onSuccess {
+                    if (recordId != null) {
+                        DownloadRegistry.update(recordId) { old ->
+                            old.copy(state = DownloadState.COMPLETED, progress = 100, detail = "串流下載完成")
+                        }
+                    }
+                    notifyDone("串流下載完成")
+                }
+                .onFailure { error ->
+                    if (recordId != null) {
+                        DownloadRegistry.update(recordId) { old ->
+                            old.copy(state = DownloadState.FAILED, detail = error.message ?: "未知錯誤")
+                        }
+                    }
+                    notifyDone("串流下載失敗：${error.message ?: "未知錯誤"}")
+                }
             stopForeground(STOP_FOREGROUND_DETACH)
             stopSelf(startId)
         }
@@ -72,7 +93,7 @@ class HlsDownloadService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun downloadHls(initialUrl: String, headers: Map<String, String>) {
+    private fun downloadHls(initialUrl: String, headers: Map<String, String>, recordId: String?) {
         var playlistUrl = initialUrl
         var manifest = fetchText(playlistUrl, headers)
 
@@ -103,6 +124,16 @@ class HlsDownloadService : Service() {
                 output.write(bytes)
                 if (index % 5 == 0 || index == parsed.segments.lastIndex) {
                     updateProgress(index + 1, parsed.segments.size)
+                    if (recordId != null) {
+                        val progress = ((index + 1) * 100 / parsed.segments.size).coerceIn(0, 100)
+                        DownloadRegistry.update(recordId) { old ->
+                            old.copy(
+                                state = DownloadState.DOWNLOADING,
+                                progress = progress,
+                                detail = "${index + 1} / ${parsed.segments.size} 分段",
+                            )
+                        }
+                    }
                 }
             }
             output.flush()
