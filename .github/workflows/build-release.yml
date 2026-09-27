@@ -1,4 +1,4 @@
-name: Build APK
+name: Build and Release APK
 
 on:
   push:
@@ -11,10 +11,10 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build:
+  build-release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -48,8 +48,8 @@ jobs:
           go mod tidy
           chmod +x build-aar.sh
           ./build-aar.sh arm64
-          mkdir -p "${GITHUB_WORKSPACE}/app/libs"
-          cp ../app/libs/netstack.aar "${GITHUB_WORKSPACE}/app/libs/netstack.aar"
+          mkdir -p "$GITHUB_WORKSPACE/app/libs"
+          cp ../app/libs/netstack.aar "$GITHUB_WORKSPACE/app/libs/netstack.aar"
 
       - name: Set up Gradle 9.6.0
         uses: gradle/actions/setup-gradle@v4
@@ -59,9 +59,23 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
+      - name: Prepare APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk Meerkat-v0.4.0-debug.apk
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: meerkat-development-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: Meerkat-v0.4.0-debug
+          path: Meerkat-v0.4.0-debug.apk
           if-no-files-found: error
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete v0.4.0 --yes || true
+          git push origin :refs/tags/v0.4.0 || true
+          gh release create v0.4.0 Meerkat-v0.4.0-debug.apk \
+            --target "${GITHUB_SHA}" \
+            --title "Meerkat v0.4.0" \
+            --notes "目前功能整合版：繁體中文深色 Material 3 介面、內建 WebView 資源嗅探、指定外部 App 本機 VPN forwarding、資源分類/歷史/Session、懸浮資源面板、圖片/影片/音訊預覽、HLS/DASH 下載、畫質選擇、取消/重試、下載管理、signed URL 去重、Cookie/Referer/User-Agent 下載 context，以及本機檔案開啟/分享。外部 App 的 HTTPS 完整 URL 仍受 TLS/憑證釘選/DRM 限制。"
