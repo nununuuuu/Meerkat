@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class NetstackForwarder(
     private val vpnService: VpnService,
     private val sourcePackage: String?,
+    private val sourceName: String?,
 ) {
     private val executor = Executors.newCachedThreadPool()
     private val stopped = AtomicBoolean(false)
@@ -70,7 +71,7 @@ class NetstackForwarder(
     private fun relayTcp(dstIp: String, dstPort: Int, conn: TCPConn) {
         val socket = Socket()
         openSockets += socket
-        val inspector = HttpResourceStreamInspector(sourcePackage)
+        val inspector = HttpResourceStreamInspector(sourcePackage, sourceName)
         try {
             if (!vpnService.protect(socket)) return
             socket.tcpNoDelay = true
