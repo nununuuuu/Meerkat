@@ -6,12 +6,9 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
-import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import com.resourcesniffer.app.MainActivity
 import com.resourcesniffer.app.R
-import java.io.FileInputStream
-import java.util.concurrent.atomic.AtomicBoolean
 
 class SnifferVpnService : VpnService() {
 
@@ -23,9 +20,7 @@ class SnifferVpnService : VpnService() {
         private const val NOTIFICATION_ID = 1001
     }
 
-    private var tun: ParcelFileDescriptor? = null
-    private var readerThread: Thread? = null
-    private val running = AtomicBoolean(false)
+    @Volatile private var forwarder: NetstackForwarder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -35,63 +30,82 @@ class SnifferVpnService : VpnService() {
         return START_STICKY
     }
 
+    @Synchronized
     private fun startCapture(targetPackage: String?) {
-        if (running.getAndSet(true)) return
+        if (forwarder != null) return
+
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification(targetPackage))
 
         val builder = Builder()
-            .setSession("Resource Sniffer")
+            .setSession("Meerkat 資源嗅探")
             .setMtu(1500)
             .addAddress("10.73.0.1", 32)
             .addRoute("0.0.0.0", 0)
             .addDnsServer("1.1.1.1")
 
         if (!targetPackage.isNullOrBlank()) {
-            runCatching { builder.addAllowedApplication(targetPackage) }
-        }
-
-        tun = builder.establish()
-        val descriptor = tun ?: run {
+            val allowed = runCatching {
+                builder.addAllowedApplication(targetPackage)
+                true
+            }.getOrDefault(false)
+            if (!allowed) {
+                stopCapture()
+                return
+            }
+        } else {
+            // Avoid accidentally routing the whole device while this feature is
+            // intended for a user-selected target application.
             stopCapture()
             return
         }
 
-        readerThread = Thread {
-            val input = FileInputStream(descriptor.fileDescriptor)
-            val parser = PacketMetadataParser(ConnectionOwnerResolver(this))
-            val buffer = ByteArray(32767)
-            try {
-                while (running.get()) {
-                    val length = input.read(buffer)
-                    if (length > 0) parser.inspect(buffer, length)
-                }
-            } catch (_: Exception) {
-            }
-        }.apply {
-            name = "ResourceSniffer-TunReader"
-            start()
+        val pfd = builder.establish() ?: run {
+            stopCapture()
+            return
+        }
+
+        val fd = pfd.detachFd()
+        val engine = NetstackForwarder(this, targetPackage)
+        forwarder = engine
+
+        try {
+            engine.start(fd, 1500)
+        } catch (_: Throwable) {
+            runCatching { android.system.Os.close(java.io.FileDescriptor().apply {
+                // fd ownership is handed to the native bridge on successful start.
+                // If startup fails before that point, service teardown handles the
+                // process-level descriptor cleanup.
+            }) }
+            stopCapture()
         }
     }
 
+    @Synchronized
     private fun stopCapture() {
-        running.set(false)
-        runCatching { tun?.close() }
-        tun = null
-        readerThread = null
+        val engine = forwarder
+        forwarder = null
+        runCatching { engine?.stop() }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
-    override fun onDestroy() {
+    override fun onRevoke() {
         stopCapture()
+        super.onRevoke()
+    }
+
+    override fun onDestroy() {
+        val engine = forwarder
+        forwarder = null
+        runCatching { engine?.stop() }
         super.onDestroy()
     }
 
     private fun buildNotification(targetPackage: String?) = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.stat_sys_download_done)
-        .setContentTitle("Resource Sniffer")
-        .setContentText(targetPackage?.let { "Capture core active: $it" } ?: "Capture core active")
+        .setContentTitle("Meerkat 正在嗅探資源")
+        .setContentText(targetPackage ?: "已啟用")
         .setOngoing(true)
         .setContentIntent(
             PendingIntent.getActivity(
@@ -106,7 +120,11 @@ class SnifferVpnService : VpnService() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getSystemService(NotificationManager::class.java).createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, getString(R.string.vpn_channel_name), NotificationManager.IMPORTANCE_LOW)
+                NotificationChannel(
+                    CHANNEL_ID,
+                    getString(R.string.vpn_channel_name),
+                    NotificationManager.IMPORTANCE_LOW,
+                )
             )
         }
     }
