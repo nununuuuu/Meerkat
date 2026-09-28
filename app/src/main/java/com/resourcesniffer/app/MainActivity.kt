@@ -462,7 +462,9 @@ private fun BrowserPane(
                                 localAddress = it
                                 onAddressChange(it)
                             }
-                            view?.let { scanDomResources(it, viewModel) }
+                            view?.let { page ->
+                                page.postDelayed({ scanDomResources(page, viewModel) }, 600)
+                            }
                             super.onPageFinished(view, url)
                         }
                     }
@@ -1195,8 +1197,8 @@ private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
             document.querySelectorAll(pair[0]).forEach(e => put(e.content, pair[1], null, null, null));
           });
 
-          document.querySelectorAll('*').forEach(e => {
-            const bg = getComputedStyle(e).backgroundImage;
+          document.querySelectorAll('[style*="background"], [style*="background-image"]').forEach(e => {
+            const bg = e.style.backgroundImage || getComputedStyle(e).backgroundImage;
             if (!bg || bg === 'none') return;
             const matches = bg.match(/url\((['"]?)(.*?)\1\)/g) || [];
             matches.forEach(m => {
