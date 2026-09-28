@@ -92,9 +92,7 @@ object SnifferRepository {
                 k in setOf(
                     "token", "sig", "signature", "expires", "expiry", "auth", "auth_key",
                     "policy", "key-pair-id", "x-amz-signature", "x-amz-credential",
-                    "x-amz-date", "x-amz-expires", "x-amz-security-token",
-                    "w", "width", "h", "height", "q", "quality", "size",
-                    "resize", "crop", "fit", "dpr"
+                    "x-amz-date", "x-amz-expires", "x-amz-security-token"
                 ) || k.startsWith("utm_")
             }
             .sorted()
