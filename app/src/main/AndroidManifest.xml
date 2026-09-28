@@ -18,6 +18,11 @@
         android:theme="@style/Theme.ResourceSniffer">
 
         <activity
+            android:name=".GeckoPocActivity"
+            android:exported="false"
+            android:windowSoftInputMode="stateUnspecified|adjustResize" />
+
+        <activity
             android:name=".MainActivity"
             android:exported="true">
             <intent-filter>

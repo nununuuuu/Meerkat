@@ -645,6 +645,9 @@ private fun ResourcePane(
                 Text("清空歷史")
             }
             OutlinedButton(onClick = onEnableOverlay) { Text("啟用懸浮球") }
+            OutlinedButton(onClick = {
+                context.startActivity(Intent(context, GeckoPocActivity::class.java))
+            }) { Text("Gecko + 貓抓") }
         }
 
         OutlinedTextField(
