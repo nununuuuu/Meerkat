@@ -62,8 +62,8 @@ class OverlayService : Service() {
             NOTIFICATION_ID,
             NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_menu_view)
-                .setContentTitle("Meerkat 資源嗅探")
-                .setContentText("懸浮控制已啟用")
+                .setContentTitle("Meerkat 資源面板")
+                .setContentText("顯示 Meerkat 已抓到的圖片與影片")
                 .setOngoing(true)
                 .setContentIntent(
                     PendingIntent.getActivity(
@@ -172,7 +172,7 @@ class OverlayService : Service() {
         }
 
         val title = TextView(this).apply {
-            text = "Meerkat 資源嗅探"
+            text = "Meerkat 資源面板"
             setTextColor(0xFF96F4D5.toInt())
             textSize = 18f
         }
@@ -207,15 +207,10 @@ class OverlayService : Service() {
             setOnClickListener { SnifferRepository.clearSession(SessionStore.idOrDefault()) }
         }
         val stop = Button(this).apply {
-            text = "停止嗅探"
+            text = "關閉懸浮球"
             setTextColor(0xFFFFDAD6.toInt())
             backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF8C1D18.toInt())
             setOnClickListener {
-                startService(
-                    Intent(this@OverlayService, SnifferVpnService::class.java).apply {
-                        action = SnifferVpnService.ACTION_STOP
-                    }
-                )
                 stopSelf()
             }
         }
@@ -250,7 +245,7 @@ class OverlayService : Service() {
     private fun buildSummary(items: List<com.resourcesniffer.app.core.Resource>): String {
         fun count(type: ResourceType) = items.count { it.type == type }
         if (items.isEmpty()) {
-            return "本次尚未取得可下載資源\nHTTPS App 通常無法從加密流量取得完整 URL"
+            return "目前沒有已抓到的資源\n請先在 Meerkat 瀏覽器載入頁面"
         }
         return "圖片 ${count(ResourceType.IMAGE)}　影片 ${count(ResourceType.VIDEO)}\n" +
             "音訊 ${count(ResourceType.AUDIO)}　串流 ${count(ResourceType.STREAM)}\n" +
