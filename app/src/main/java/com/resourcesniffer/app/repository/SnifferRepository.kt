@@ -40,19 +40,22 @@ object SnifferRepository {
 
         val merged = if (existing >= 0) {
             val old = current[existing]
-            val replacement = resource.copy(
+            val preferred = if (qualityScore(resource) >= qualityScore(old)) resource else old
+            val secondary = if (preferred === resource) old else resource
+            val replacement = preferred.copy(
                 id = old.id,
+                sessionId = resource.sessionId,
                 detectedAt = maxOf(old.detectedAt, resource.detectedAt),
-                mimeType = resource.mimeType ?: old.mimeType,
-                contentLength = resource.contentLength ?: old.contentLength,
-                referer = resource.referer ?: old.referer,
-                userAgent = resource.userAgent ?: old.userAgent,
-                cookie = resource.cookie ?: old.cookie,
-                width = resource.width ?: old.width,
-                height = resource.height ?: old.height,
-                durationMs = resource.durationMs ?: old.durationMs,
-                videoCodec = resource.videoCodec ?: old.videoCodec,
-                audioCodec = resource.audioCodec ?: old.audioCodec,
+                mimeType = preferred.mimeType ?: secondary.mimeType,
+                contentLength = maxOfNullable(old.contentLength, resource.contentLength),
+                referer = preferred.referer ?: secondary.referer,
+                userAgent = preferred.userAgent ?: secondary.userAgent,
+                cookie = preferred.cookie ?: secondary.cookie,
+                width = maxOfNullable(old.width, resource.width),
+                height = maxOfNullable(old.height, resource.height),
+                durationMs = maxOfNullable(old.durationMs, resource.durationMs),
+                videoCodec = preferred.videoCodec ?: secondary.videoCodec,
+                audioCodec = preferred.audioCodec ?: secondary.audioCodec,
             )
             listOf(replacement) + current.filterIndexed { index, _ -> index != existing }
         } else {
@@ -89,7 +92,9 @@ object SnifferRepository {
                 k in setOf(
                     "token", "sig", "signature", "expires", "expiry", "auth", "auth_key",
                     "policy", "key-pair-id", "x-amz-signature", "x-amz-credential",
-                    "x-amz-date", "x-amz-expires", "x-amz-security-token"
+                    "x-amz-date", "x-amz-expires", "x-amz-security-token",
+                    "w", "width", "h", "height", "q", "quality", "size",
+                    "resize", "crop", "fit", "dpr"
                 ) || k.startsWith("utm_")
             }
             .sorted()
@@ -99,6 +104,27 @@ object SnifferRepository {
                 }
             }
         return builder.build().toString()
+    }
+
+    private fun qualityScore(resource: Resource): Long {
+        val pixels = (resource.width?.toLong() ?: 0L) * (resource.height?.toLong() ?: 0L)
+        val size = resource.contentLength ?: 0L
+        return when (resource.type) {
+            ResourceType.IMAGE, ResourceType.VIDEO -> pixels * 1_000_000L + size.coerceAtMost(999_999L)
+            else -> size
+        }
+    }
+
+    private fun maxOfNullable(a: Long?, b: Long?): Long? = when {
+        a == null -> b
+        b == null -> a
+        else -> maxOf(a, b)
+    }
+
+    private fun maxOfNullable(a: Int?, b: Int?): Int? = when {
+        a == null -> b
+        b == null -> a
+        else -> maxOf(a, b)
     }
 
     private fun persistHistory(resources: List<Resource>) {
