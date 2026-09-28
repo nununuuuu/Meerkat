@@ -10,6 +10,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 
 object SnifferRepository {
     private const val PREFS = "meerkat_resources"
@@ -20,6 +23,8 @@ object SnifferRepository {
     val resources: StateFlow<List<Resource>> = _resources.asStateFlow()
 
     @Volatile private var appContext: Context? = null
+    private val persistenceExecutor = Executors.newSingleThreadScheduledExecutor()
+    @Volatile private var pendingPersist: ScheduledFuture<*>? = null
 
     @Synchronized
     fun initialize(context: Context) {
@@ -63,7 +68,7 @@ object SnifferRepository {
         }.take(MAX_HISTORY)
 
         _resources.value = merged
-        persistHistory(merged)
+        schedulePersist()
     }
 
     @Synchronized
@@ -123,6 +128,14 @@ object SnifferRepository {
         a == null -> b
         b == null -> a
         else -> maxOf(a, b)
+    }
+
+    private fun schedulePersist() {
+        pendingPersist?.cancel(false)
+        pendingPersist = persistenceExecutor.schedule({
+            val snapshot = _resources.value
+            persistHistory(snapshot)
+        }, 750, TimeUnit.MILLISECONDS)
     }
 
     private fun persistHistory(resources: List<Resource>) {
