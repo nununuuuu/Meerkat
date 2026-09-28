@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -71,9 +71,24 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
+      - name: Prepare release APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk Meerkat-v0.5.0-beta3-debug.apk
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: meerkat-development-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: Meerkat-v0.5.0-beta3-debug
+          path: Meerkat-v0.5.0-beta3-debug.apk
           if-no-files-found: error
+
+      - name: Create GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete v0.5.0-beta3 --yes || true
+          git push origin :refs/tags/v0.5.0-beta3 || true
+          gh release create v0.5.0-beta3 Meerkat-v0.5.0-beta3-debug.apk \
+            --target "$GITHUB_SHA" \
+            --title "Meerkat v0.5.0-beta3" \
+            --prerelease \
+            --notes "Gecko + Cat Catch PoC 測試版。新增 GeckoView 瀏覽器與 Cat Catch 2.7.2 WebExtension 實驗入口，用於驗證圖片、影片、m3u8/MPD 等資源嗅探能力。保留原 Meerkat WebView 功能。Cat Catch 來源：xifangczy/cat-catch commit 8cdde7c32fd5bd8d367f861dad86702a8daa13b1，授權 GPL-3.0。GeckoView 固定為 159.0.20260927205153。"
