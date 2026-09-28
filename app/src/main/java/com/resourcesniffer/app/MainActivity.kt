@@ -20,6 +20,12 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import android.widget.ImageView
+import android.widget.VideoView
+import android.widget.MediaController
+import android.graphics.BitmapFactory
+import java.net.HttpURLConnection
+import java.net.URL
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -881,13 +887,14 @@ private fun resourceSummaryLine(resource: Resource): String {
     return parts.joinToString(" · ")
 }
 
-@SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun ResourcePreviewDialog(
     resource: Resource,
     onDismiss: () -> Unit,
 ) {
     val url = resource.url ?: return
+    var previewError by remember(resource.id) { mutableStateOf<String?>(null) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
@@ -895,44 +902,116 @@ private fun ResourcePreviewDialog(
         },
         title = { Text("資源預覽") },
         text = {
-            AndroidView(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(360.dp),
-                factory = { context ->
-                    WebView(context).apply {
-                        setBackgroundColor(android.graphics.Color.BLACK)
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.mediaPlaybackRequiresUserGesture = false
-                        settings.loadsImagesAutomatically = true
-                        settings.blockNetworkImage = false
-                        resource.userAgent?.takeIf { it.isNotBlank() }?.let {
-                            settings.userAgentString = it
-                        }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                when (resource.type) {
+                    ResourceType.IMAGE -> {
+                        AndroidView(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(360.dp),
+                            factory = { context ->
+                                ImageView(context).apply {
+                                    setBackgroundColor(android.graphics.Color.DKGRAY)
+                                    scaleType = ImageView.ScaleType.FIT_CENTER
 
-                        val cookieManager = CookieManager.getInstance()
-                        cookieManager.setAcceptCookie(true)
-                        resource.cookie?.takeIf { it.isNotBlank() }?.let { cookie ->
-                            runCatching { cookieManager.setCookie(url, cookie) }
-                            runCatching { cookieManager.flush() }
-                        }
-
-                        webChromeClient = WebChromeClient()
-                        webViewClient = object : WebViewClient() {
-                            override fun shouldOverrideUrlLoading(
-                                view: WebView?,
-                                request: WebResourceRequest?,
-                            ): Boolean = false
-                        }
-
-                        val headers = buildMap {
-                            resource.referer?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
-                        }
-                        loadUrl(url, headers)
+                                    Thread {
+                                        runCatching {
+                                            val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                                                instanceFollowRedirects = true
+                                                connectTimeout = 15_000
+                                                readTimeout = 20_000
+                                                setRequestProperty("Accept", "image/*")
+                                                resource.userAgent?.takeIf { it.isNotBlank() }?.let {
+                                                    setRequestProperty("User-Agent", it)
+                                                }
+                                                resource.referer?.takeIf { it.isNotBlank() }?.let {
+                                                    setRequestProperty("Referer", it)
+                                                }
+                                                resource.cookie?.takeIf { it.isNotBlank() }?.let {
+                                                    setRequestProperty("Cookie", it)
+                                                }
+                                            }
+                                            connection.connect()
+                                            if (connection.responseCode !in 200..299) {
+                                                throw IllegalStateException("HTTP ${connection.responseCode}")
+                                            }
+                                            connection.inputStream.use { BitmapFactory.decodeStream(it) }
+                                                ?: throw IllegalStateException("不是可解碼的圖片")
+                                        }.onSuccess { bitmap ->
+                                            post {
+                                                setImageBitmap(bitmap)
+                                                previewError = null
+                                            }
+                                        }.onFailure { error ->
+                                            post {
+                                                previewError = "圖片預覽失敗：${error.message ?: "未知錯誤"}"
+                                            }
+                                        }
+                                    }.start()
+                                }
+                            },
+                        )
                     }
-                },
-            )
+
+                    ResourceType.VIDEO, ResourceType.AUDIO -> {
+                        AndroidView(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(360.dp),
+                            factory = { context ->
+                                VideoView(context).apply {
+                                    setBackgroundColor(android.graphics.Color.DKGRAY)
+                                    val controller = MediaController(context)
+                                    controller.setAnchorView(this)
+                                    setMediaController(controller)
+
+                                    val headers = buildMap {
+                                        resource.userAgent?.takeIf { it.isNotBlank() }?.let {
+                                            put("User-Agent", it)
+                                        }
+                                        resource.referer?.takeIf { it.isNotBlank() }?.let {
+                                            put("Referer", it)
+                                        }
+                                        resource.cookie?.takeIf { it.isNotBlank() }?.let {
+                                            put("Cookie", it)
+                                        }
+                                    }
+
+                                    setOnPreparedListener {
+                                        previewError = null
+                                        start()
+                                    }
+                                    setOnErrorListener { _, what, extra ->
+                                        previewError = "媒體預覽失敗：what=$what extra=$extra"
+                                        true
+                                    }
+                                    setVideoURI(Uri.parse(url), headers)
+                                    requestFocus()
+                                }
+                            },
+                        )
+                    }
+
+                    else -> {
+                        Text("此類型目前不支援內建預覽。")
+                    }
+                }
+
+                previewError?.let {
+                    Text(
+                        it,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+
+                Text(
+                    url,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 3,
+                )
+            }
         },
     )
 }
