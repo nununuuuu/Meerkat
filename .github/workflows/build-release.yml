@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -71,9 +71,24 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
+      - name: Prepare release APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk Meerkat-v0.5.0-beta4-debug.apk
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: meerkat-development-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: Meerkat-v0.5.0-beta4-debug
+          path: Meerkat-v0.5.0-beta4-debug.apk
           if-no-files-found: error
+
+      - name: Create GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete v0.5.0-beta4 --yes || true
+          git push origin :refs/tags/v0.5.0-beta4 || true
+          gh release create v0.5.0-beta4 Meerkat-v0.5.0-beta4-debug.apk \
+            --target "$GITHUB_SHA" \
+            --title "Meerkat v0.5.0-beta4" \
+            --prerelease \
+            --notes "核心邏輯強化測試版：新增資源驗證層（final URL、Content-Type、Content-Length、ETag、圖片實際尺寸、驗證狀態）；Raw/Preferred 雙層資源模型；同媒體 CDN/尺寸變體分組並優先選已驗證高品質版本；下載改用驗證後 final URL；HLS 僅接受 NONE/AES-128，其他加密方式明確拒絕；DownloadManager ID 對應持久化並於 App 重啟後恢復。仍保留 Gecko + Cat Catch 2.7.2 PoC。"
