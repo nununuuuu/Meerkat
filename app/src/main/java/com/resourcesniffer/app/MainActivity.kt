@@ -901,24 +901,35 @@ private fun ResourcePreviewDialog(
                     .height(360.dp),
                 factory = { context ->
                     WebView(context).apply {
+                        setBackgroundColor(android.graphics.Color.BLACK)
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
-                        CookieManager.getInstance().setAcceptCookie(true)
-                        val safe = org.json.JSONObject.quote(url)
-                        val html = when (resource.type) {
-                            ResourceType.IMAGE ->
-                                "<html><body style='margin:0;background:#111;display:flex;align-items:center;justify-content:center'><img src=" +
-                                    safe +
-                                    " style='max-width:100%;max-height:100%;object-fit:contain'/></body></html>"
-                            ResourceType.VIDEO ->
-                                "<html><body style='margin:0;background:#111'><video src=" +
-                                    safe +
-                                    " controls autoplay style='width:100%;height:100%'></video></body></html>"
-                            ResourceType.AUDIO ->
-                                "<html><body><audio src=" + safe + " controls autoplay style='width:100%'></audio></body></html>"
-                            else -> "<html><body>此類型不支援內建預覽</body></html>"
+                        settings.mediaPlaybackRequiresUserGesture = false
+                        settings.loadsImagesAutomatically = true
+                        settings.blockNetworkImage = false
+                        resource.userAgent?.takeIf { it.isNotBlank() }?.let {
+                            settings.userAgentString = it
                         }
-                        loadDataWithBaseURL(url, html, "text/html", "UTF-8", null)
+
+                        val cookieManager = CookieManager.getInstance()
+                        cookieManager.setAcceptCookie(true)
+                        resource.cookie?.takeIf { it.isNotBlank() }?.let { cookie ->
+                            runCatching { cookieManager.setCookie(url, cookie) }
+                            runCatching { cookieManager.flush() }
+                        }
+
+                        webChromeClient = WebChromeClient()
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                            ): Boolean = false
+                        }
+
+                        val headers = buildMap {
+                            resource.referer?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
+                        }
+                        loadUrl(url, headers)
                     }
                 },
             )
