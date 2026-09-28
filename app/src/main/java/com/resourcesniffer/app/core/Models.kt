@@ -6,6 +6,8 @@ enum class ResourceType {
 
 enum class StreamType { HLS, DASH, DIRECT }
 
+enum class ValidationState { UNVERIFIED, VERIFIED, FAILED }
+
 data class Resource(
     val id: Long,
     val sessionId: Long,
@@ -26,6 +28,11 @@ data class Resource(
     val durationMs: Long? = null,
     val videoCodec: String? = null,
     val audioCodec: String? = null,
+    val finalUrl: String? = null,
+    val etag: String? = null,
+    val mediaGroupKey: String? = null,
+    val validationState: ValidationState = ValidationState.UNVERIFIED,
+    val verifiedAt: Long? = null,
     val detectedAt: Long = System.currentTimeMillis(),
 )
 
