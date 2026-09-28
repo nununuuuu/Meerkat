@@ -600,6 +600,7 @@ private fun ResourcePane(
     onClear: () -> Unit,
     onEnableOverlay: () -> Unit,
 ) {
+    val context = LocalContext.current
     var selectedType by remember { mutableStateOf<ResourceType?>(null) }
     var query by remember { mutableStateOf("") }
     var currentOnly by remember { mutableStateOf(true) }
