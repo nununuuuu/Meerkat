@@ -1,4 +1,4 @@
-name: Build and Release APK
+name: Build APK
 
 on:
   push:
@@ -11,10 +11,10 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-release:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -59,24 +59,9 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Prepare APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk Meerkat-v0.5.0-beta2-debug.apk
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Meerkat-v0.5.0-beta2-debug
-          path: Meerkat-v0.5.0-beta2-debug.apk
+          name: meerkat-development-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-
-      - name: Create GitHub prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete v0.5.0-beta2 --yes || true
-          git push origin :refs/tags/v0.5.0-beta2 || true
-          gh release create v0.5.0-beta2 Meerkat-v0.5.0-beta2-debug.apk \
-            --target "$GITHUB_SHA" \
-            --title "Meerkat v0.5.0-beta2" \
-            --prerelease \
-            --notes "預覽修正版：資源頁圖片改用原生 ImageView 下載與解碼；影片/音訊改用 Android VideoView + MediaController；預覽請求帶入 Cookie、Referer、User-Agent；預覽失敗時顯示實際錯誤，不再只顯示黑畫面。"
