@@ -417,7 +417,22 @@ private fun BrowserPane(
                             view: WebView?,
                             request: WebResourceRequest?,
                         ): Boolean {
-                            return false
+                            val raw = request?.url?.toString() ?: return false
+                            val scheme = request.url.scheme?.lowercase()
+                            if (scheme == "http" || scheme == "https") return false
+
+                            val fallback = resolveBrowsableUrl(raw)
+                            if (!fallback.isNullOrBlank()) {
+                                pageError = null
+                                localAddress = fallback
+                                onAddressChange(fallback)
+                                view?.loadUrl(fallback)
+                                return true
+                            }
+
+                            // Unknown app/deep-link schemes should not be handed back to WebView.
+                            pageError = "此連結是 App 深層連結，Meerkat 已阻止 WebView 直接載入：$scheme"
+                            return true
                         }
 
                         override fun shouldInterceptRequest(
@@ -1287,6 +1302,37 @@ private fun resourceTypeLabel(type: ResourceType): String = when (type) {
     ResourceType.STREAM -> "串流"
     ResourceType.ARCHIVE -> "壓縮檔"
     ResourceType.OTHER -> "其他"
+}
+
+private fun resolveBrowsableUrl(raw: String): String? {
+    val trimmed = raw.trim()
+    if (trimmed.startsWith("http://", true) || trimmed.startsWith("https://", true)) {
+        return trimmed
+    }
+
+    if (trimmed.startsWith("intent://", true)) {
+        val parsed = runCatching {
+            Intent.parseUri(trimmed, Intent.URI_INTENT_SCHEME)
+        }.getOrNull()
+
+        parsed?.getStringExtra("browser_fallback_url")
+            ?.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }
+            ?.let { return it }
+
+        parsed?.dataString
+            ?.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }
+            ?.let { return it }
+
+        val body = trimmed
+            .substringAfter("intent://")
+            .substringBefore("#Intent;")
+            .trimStart('/')
+        if (body.isNotBlank() && body.substringBefore('/').contains('.')) {
+            return "https://$body"
+        }
+    }
+
+    return null
 }
 
 private fun normalizeUrl(value: String): String {
