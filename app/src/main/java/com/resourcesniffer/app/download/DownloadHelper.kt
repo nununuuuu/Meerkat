@@ -24,7 +24,7 @@ object DownloadHelper {
         resource: Resource,
         quality: DownloadQuality = DownloadQuality.HIGH,
     ) {
-        val url = resource.url ?: error("缺少資源網址")
+        val url = resource.finalUrl ?: resource.url ?: error("缺少資源網址")
         val cookie = resource.cookie ?: CookieManager.getInstance().getCookie(url)
         val record = DownloadRecord(
             id = UUID.randomUUID().toString(),
