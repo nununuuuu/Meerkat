@@ -2,7 +2,9 @@ package com.resourcesniffer.app.repository
 
 import android.content.Context
 import android.net.Uri
+import com.resourcesniffer.app.core.MediaIdentity
 import com.resourcesniffer.app.core.Resource
+import com.resourcesniffer.app.core.ValidationState
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.core.StreamType
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -22,6 +24,9 @@ object SnifferRepository {
     private val _resources = MutableStateFlow<List<Resource>>(emptyList())
     val resources: StateFlow<List<Resource>> = _resources.asStateFlow()
 
+    private val _preferredResources = MutableStateFlow<List<Resource>>(emptyList())
+    val preferredResources: StateFlow<List<Resource>> = _preferredResources.asStateFlow()
+
     @Volatile private var appContext: Context? = null
     private val persistenceExecutor = Executors.newSingleThreadScheduledExecutor()
     @Volatile private var pendingPersist: ScheduledFuture<*>? = null
@@ -30,17 +35,21 @@ object SnifferRepository {
     fun initialize(context: Context) {
         if (appContext != null) return
         appContext = context.applicationContext
-        _resources.value = loadHistory()
+        val loaded = loadHistory()
+        _resources.value = loaded
+        recomputePreferred(loaded)
     }
 
     @Synchronized
     fun add(resource: Resource) {
         val current = _resources.value
-        val resourceKey = canonicalKey(resource.url)
+        val resourceKey = MediaIdentity.exactKey(resource.finalUrl ?: resource.url)
         val existing = current.indexOfFirst {
-            canonicalKey(it.url) == resourceKey &&
-                it.type == resource.type &&
-                it.sourceAppPackage == resource.sourceAppPackage
+            it.id == resource.id || (
+                MediaIdentity.exactKey(it.finalUrl ?: it.url) == resourceKey &&
+                    it.type == resource.type &&
+                    it.sourceAppPackage == resource.sourceAppPackage
+            )
         }
 
         val merged = if (existing >= 0) {
@@ -61,19 +70,31 @@ object SnifferRepository {
                 durationMs = maxOfNullable(old.durationMs, resource.durationMs),
                 videoCodec = preferred.videoCodec ?: secondary.videoCodec,
                 audioCodec = preferred.audioCodec ?: secondary.audioCodec,
+                finalUrl = resource.finalUrl ?: old.finalUrl,
+                etag = resource.etag ?: old.etag,
+                mediaGroupKey = resource.mediaGroupKey ?: old.mediaGroupKey ?: MediaIdentity.groupKey(resource.finalUrl ?: resource.url),
+                validationState = when {
+                    resource.validationState == ValidationState.VERIFIED -> ValidationState.VERIFIED
+                    old.validationState == ValidationState.VERIFIED -> ValidationState.VERIFIED
+                    resource.validationState == ValidationState.FAILED && old.validationState == ValidationState.FAILED -> ValidationState.FAILED
+                    else -> ValidationState.UNVERIFIED
+                },
+                verifiedAt = maxOfNullable(old.verifiedAt, resource.verifiedAt),
             )
             listOf(replacement) + current.filterIndexed { index, _ -> index != existing }
         } else {
-            listOf(resource) + current
+            listOf(resource.copy(mediaGroupKey = resource.mediaGroupKey ?: MediaIdentity.groupKey(resource.finalUrl ?: resource.url))) + current
         }.take(MAX_HISTORY)
 
         _resources.value = merged
+        recomputePreferred(merged)
         schedulePersist()
     }
 
     @Synchronized
     fun clear() {
         _resources.value = emptyList()
+        _preferredResources.value = emptyList()
         appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             ?.edit()?.remove(KEY_HISTORY)?.apply()
     }
@@ -83,38 +104,17 @@ object SnifferRepository {
         if (sessionId == 0L) return
         val kept = _resources.value.filterNot { it.sessionId == sessionId }
         _resources.value = kept
+        recomputePreferred(kept)
         persistHistory(kept)
     }
 
-    private fun canonicalKey(url: String?): String? {
-        if (url.isNullOrBlank()) return url
-        val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return url
-        val builder = uri.buildUpon().clearQuery()
-        val stableNames = runCatching { uri.queryParameterNames }.getOrDefault(emptySet())
-        stableNames
-            .filterNot { key ->
-                val k = key.lowercase()
-                k in setOf(
-                    "token", "sig", "signature", "expires", "expiry", "auth", "auth_key",
-                    "policy", "key-pair-id", "x-amz-signature", "x-amz-credential",
-                    "x-amz-date", "x-amz-expires", "x-amz-security-token"
-                ) || k.startsWith("utm_")
-            }
-            .sorted()
-            .forEach { key ->
-                uri.getQueryParameters(key).forEach { value ->
-                    builder.appendQueryParameter(key, value)
-                }
-            }
-        return builder.build().toString()
-    }
-
     private fun qualityScore(resource: Resource): Long {
+        val verifiedBonus = if (resource.validationState == ValidationState.VERIFIED) 9_000_000_000_000_000L else 0L
         val pixels = (resource.width?.toLong() ?: 0L) * (resource.height?.toLong() ?: 0L)
         val size = resource.contentLength ?: 0L
         return when (resource.type) {
-            ResourceType.IMAGE, ResourceType.VIDEO -> pixels * 1_000_000L + size.coerceAtMost(999_999L)
-            else -> size
+            ResourceType.IMAGE, ResourceType.VIDEO -> verifiedBonus + pixels.coerceAtMost(8_000_000_000L) * 1_000_000L + size.coerceAtMost(999_999L)
+            else -> verifiedBonus + size
         }
     }
 
@@ -130,6 +130,13 @@ object SnifferRepository {
         else -> maxOf(a, b)
     }
 
+    private fun recomputePreferred(all: List<Resource>) {
+        _preferredResources.value = all
+            .groupBy { it.mediaGroupKey ?: MediaIdentity.groupKey(it.finalUrl ?: it.url) ?: "id:" + it.id }
+            .values
+            .mapNotNull { variants -> variants.maxByOrNull(::qualityScore) }
+            .sortedByDescending { it.detectedAt }
+    }
     private fun schedulePersist() {
         pendingPersist?.cancel(false)
         pendingPersist = persistenceExecutor.schedule({
@@ -161,6 +168,11 @@ object SnifferRepository {
                     put("durationMs", resource.durationMs)
                     put("videoCodec", resource.videoCodec)
                     put("audioCodec", resource.audioCodec)
+                    put("finalUrl", resource.finalUrl)
+                    put("etag", resource.etag)
+                    put("mediaGroupKey", resource.mediaGroupKey)
+                    put("validationState", resource.validationState.name)
+                    put("verifiedAt", resource.verifiedAt)
                     put("detectedAt", resource.detectedAt)
                 }
             )
@@ -202,6 +214,13 @@ object SnifferRepository {
                             durationMs = if (item.isNull("durationMs")) null else item.optLong("durationMs"),
                             videoCodec = item.optString("videoCodec").takeIf { it.isNotBlank() && it != "null" },
                             audioCodec = item.optString("audioCodec").takeIf { it.isNotBlank() && it != "null" },
+                            finalUrl = item.optString("finalUrl").takeIf { it.isNotBlank() && it != "null" },
+                            etag = item.optString("etag").takeIf { it.isNotBlank() && it != "null" },
+                            mediaGroupKey = item.optString("mediaGroupKey").takeIf { it.isNotBlank() && it != "null" },
+                            validationState = item.optString("validationState").takeIf { it.isNotBlank() && it != "null" }
+                                ?.let { runCatching { ValidationState.valueOf(it) }.getOrNull() }
+                                ?: ValidationState.UNVERIFIED,
+                            verifiedAt = if (item.isNull("verifiedAt")) null else item.optLong("verifiedAt"),
                             detectedAt = item.optLong("detectedAt", System.currentTimeMillis()),
                         )
                     )
