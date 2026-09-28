@@ -5,6 +5,10 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Environment
+import android.provider.MediaStore
+import android.content.ContentValues
+import java.net.HttpURLConnection
+import java.net.URL
 import android.webkit.CookieManager
 import android.webkit.URLUtil
 import androidx.core.content.ContextCompat
@@ -64,6 +68,7 @@ object DownloadHelper {
             record.url.substringBefore('?').endsWith(".mpd", true)
 
         when {
+            record.mimeType?.startsWith("image/") == true -> enqueueImage(context, record)
             isHls -> {
                 ContextCompat.startForegroundService(
                     context,
@@ -96,6 +101,84 @@ object DownloadHelper {
         }
     }
 
+    private fun enqueueImage(context: Context, record: DownloadRecord) {
+        DownloadRegistry.update(record.id) {
+            it.copy(state = DownloadState.DOWNLOADING, detail = "下載圖片中")
+        }
+
+        Thread {
+            var outputUri: Uri? = null
+            try {
+                val resolver = context.contentResolver
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, record.displayName)
+                    put(MediaStore.Images.Media.MIME_TYPE, record.mimeType ?: "image/jpeg")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Meerkat")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                outputUri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    ?: error("無法建立圖片檔案")
+
+                val connection = (URL(record.url).openConnection() as HttpURLConnection).apply {
+                    instanceFollowRedirects = true
+                    connectTimeout = 15_000
+                    readTimeout = 30_000
+                    setRequestProperty("Accept", "image/*,*/*;q=0.8")
+                    record.cookie?.takeIf { it.isNotBlank() }?.let { setRequestProperty("Cookie", it) }
+                    record.userAgent?.takeIf { it.isNotBlank() }?.let { setRequestProperty("User-Agent", it) }
+                    record.referer?.takeIf { it.isNotBlank() }?.let { setRequestProperty("Referer", it) }
+                }
+                connection.connect()
+                if (connection.responseCode !in 200..299) {
+                    error("HTTP ${connection.responseCode}")
+                }
+
+                resolver.openOutputStream(outputUri, "w")!!.use { out ->
+                    connection.inputStream.use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        var read: Int
+                        var total = 0L
+                        val length = connection.contentLengthLong.takeIf { it > 0 }
+                        while (input.read(buffer).also { read = it } >= 0) {
+                            if (read == 0) continue
+                            out.write(buffer, 0, read)
+                            total += read
+                            length?.let { expected ->
+                                val progress = ((total * 100L) / expected).toInt().coerceIn(0, 100)
+                                DownloadRegistry.update(record.id) { current ->
+                                    current.copy(progress = progress, detail = "下載圖片中")
+                                }
+                            }
+                        }
+                        out.flush()
+                    }
+                }
+
+                resolver.update(
+                    outputUri,
+                    ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) },
+                    null,
+                    null,
+                )
+                DownloadRegistry.update(record.id) {
+                    it.copy(
+                        state = DownloadState.COMPLETED,
+                        progress = 100,
+                        detail = "下載完成",
+                        localUri = outputUri.toString(),
+                    )
+                }
+            } catch (t: Throwable) {
+                outputUri?.let { runCatching { context.contentResolver.delete(it, null, null) } }
+                DownloadRegistry.update(record.id) {
+                    it.copy(
+                        state = DownloadState.FAILED,
+                        detail = "圖片下載失敗：${t.message ?: "未知錯誤"}",
+                    )
+                }
+            }
+        }.start()
+    }
     private fun enqueueDirect(context: Context, record: DownloadRecord) {
         val request = DownloadManager.Request(Uri.parse(record.url))
             .setTitle(record.displayName)
