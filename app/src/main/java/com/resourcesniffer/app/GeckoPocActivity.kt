@@ -80,6 +80,12 @@ class GeckoPocActivity : ComponentActivity() {
         geckoRuntime.webExtensionController
             .ensureBuiltIn(CAT_CATCH_URI, CAT_CATCH_ID)
             .accept({ extension ->
+                if (extension == null) {
+                    runOnUiThread {
+                        cat.isEnabled = false
+                        status.text = "Cat Catch 安裝失敗：GeckoView 未回傳 extension"
+                    }
+                } else {
                 val delegate = object : WebExtension.ActionDelegate {
                     override fun onBrowserAction(
                         extension: WebExtension,
@@ -108,10 +114,11 @@ class GeckoPocActivity : ComponentActivity() {
                     cat.isEnabled = true
                     status.text = "Cat Catch " + extension.metaData.version + " 已安裝"
                 }
+                }
             }, { error ->
                 runOnUiThread {
                     cat.isEnabled = false
-                    status.text = "Cat Catch 安裝失敗：" + (error.message ?: error.javaClass.simpleName)
+                    status.text = "Cat Catch 安裝失敗：" + (error?.message ?: error?.javaClass?.simpleName ?: "未知錯誤")
                 }
             })
 
