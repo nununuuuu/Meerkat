@@ -19,6 +19,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.RenderProcessGoneDetail
 import android.widget.Toast
 import android.widget.ImageView
 import android.widget.VideoView
@@ -463,9 +464,25 @@ private fun BrowserPane(
                                 onAddressChange(it)
                             }
                             view?.let { page ->
-                                page.postDelayed({ scanDomResources(page, viewModel) }, 600)
+                                page.postDelayed({
+                                    if (page.isAttachedToWindow) scanDomResources(page, viewModel)
+                                }, 900)
                             }
                             super.onPageFinished(view, url)
+                        }
+
+                        override fun onRenderProcessGone(
+                            view: WebView?,
+                            detail: RenderProcessGoneDetail?,
+                        ): Boolean {
+                            pageError = if (detail?.didCrash() == true) {
+                                "網頁渲染程序崩潰。已停止本頁掃描，請重新載入。"
+                            } else {
+                                "網頁渲染程序被系統終止，可能是頁面過重。請重新載入。"
+                            }
+                            loading = false
+                            view?.destroy()
+                            return true
                         }
                     }
 
@@ -1129,6 +1146,9 @@ private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
     val script = """
         (function() {
           const map = new Map();
+          const MAX_RESULTS = 320;
+          const MAX_PERFORMANCE = 180;
+          const MAX_IMAGES = 100;
 
           function abs(url) {
             if (!url) return null;
@@ -1136,6 +1156,7 @@ private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
           }
 
           function put(url, kind, w, h, duration) {
+            if (map.size >= MAX_RESULTS) return;
             url = abs(url);
             if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) return;
             const old = map.get(url) || {url:url, kind:null, width:null, height:null, duration:null};
@@ -1148,7 +1169,7 @@ private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
 
           function srcsetEntries(value) {
             if (!value) return [];
-            return value.split(',').map(part => {
+            return value.split(',').slice(0, 10).map(part => {
               const bits = part.trim().split(/\s+/);
               const descriptor = bits[1] || '';
               const width = descriptor.endsWith('w') ? parseInt(descriptor, 10) : null;
@@ -1156,32 +1177,34 @@ private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
             });
           }
 
-          performance.getEntriesByType('resource').forEach(e => put(e.name, null, null, null, null));
+          performance.getEntriesByType('resource')
+            .slice(-MAX_PERFORMANCE)
+            .forEach(e => put(e.name, null, null, null, null));
 
-          document.querySelectorAll('img').forEach(e => {
+          Array.from(document.images).slice(0, MAX_IMAGES).forEach(e => {
             put(e.currentSrc || e.src, 'image', e.naturalWidth, e.naturalHeight, null);
-            srcsetEntries(e.getAttribute('srcset')).forEach(x =>
-              put(x.url, 'image', x.width, e.naturalHeight, null)
-            );
-          });
-
-          document.querySelectorAll('picture source[srcset]').forEach(e => {
             srcsetEntries(e.getAttribute('srcset')).forEach(x =>
               put(x.url, 'image', x.width, null, null)
             );
           });
 
-          document.querySelectorAll('video').forEach(video => {
+          Array.from(document.querySelectorAll('picture source[srcset]')).slice(0, 80).forEach(e => {
+            srcsetEntries(e.getAttribute('srcset')).forEach(x =>
+              put(x.url, 'image', x.width, null, null)
+            );
+          });
+
+          Array.from(document.querySelectorAll('video')).slice(0, 24).forEach(video => {
             put(video.currentSrc || video.src, 'video', video.videoWidth, video.videoHeight, video.duration);
-            if (video.poster) put(video.poster, 'image', video.videoWidth, video.videoHeight, null);
-            video.querySelectorAll('source[src]').forEach(e =>
+            if (video.poster) put(video.poster, 'image', null, null, null);
+            Array.from(video.querySelectorAll('source[src]')).slice(0, 8).forEach(e =>
               put(e.src, 'video', video.videoWidth, video.videoHeight, video.duration)
             );
           });
 
-          document.querySelectorAll('audio').forEach(audio => {
+          Array.from(document.querySelectorAll('audio')).slice(0, 24).forEach(audio => {
             put(audio.currentSrc || audio.src, 'audio', null, null, audio.duration);
-            audio.querySelectorAll('source[src]').forEach(e =>
+            Array.from(audio.querySelectorAll('source[src]')).slice(0, 8).forEach(e =>
               put(e.src, 'audio', null, null, audio.duration)
             );
           });
@@ -1194,21 +1217,20 @@ private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
             ['meta[property="og:video:url"]', 'video'],
             ['meta[property="og:video:secure_url"]', 'video']
           ].forEach(pair => {
-            document.querySelectorAll(pair[0]).forEach(e => put(e.content, pair[1], null, null, null));
+            Array.from(document.querySelectorAll(pair[0])).slice(0, 6)
+              .forEach(e => put(e.content, pair[1], null, null, null));
           });
 
-          document.querySelectorAll('[style*="background"], [style*="background-image"]').forEach(e => {
-            const bg = e.style.backgroundImage || getComputedStyle(e).backgroundImage;
-            if (!bg || bg === 'none') return;
-            const matches = bg.match(/url\((['"]?)(.*?)\1\)/g) || [];
-            matches.forEach(m => {
+          Array.from(document.querySelectorAll('[style*="url("]')).slice(0, 80).forEach(e => {
+            const style = e.getAttribute('style') || '';
+            const matches = style.match(/url\((['"]?)(.*?)\1\)/g) || [];
+            matches.slice(0, 4).forEach(m => {
               const hit = m.match(/url\((['"]?)(.*?)\1\)/);
               if (hit && hit[2]) put(hit[2], 'image', null, null, null);
             });
           });
 
-          document.querySelectorAll('a[href]').forEach(e => put(e.href, null, null, null, null));
-          return JSON.stringify(Array.from(map.values()));
+          return JSON.stringify(Array.from(map.values()).slice(0, MAX_RESULTS));
         })();
     """.trimIndent()
 
