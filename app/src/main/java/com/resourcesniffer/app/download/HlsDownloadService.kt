@@ -299,16 +299,18 @@ class HlsDownloadService : Service() {
                 line.startsWith("#EXT-X-KEY:", true) -> {
                     val attrs = line.substringAfter(':')
                     val method = attribute(attrs, "METHOD") ?: "NONE"
-                    if (method.equals("NONE", true)) {
-                        currentKey = null
-                    } else {
-                        attribute(attrs, "URI")?.let { keyUri ->
+                    when {
+                        method.equals("NONE", true) -> currentKey = null
+                        method.equals("AES-128", true) -> {
+                            val keyUri = attribute(attrs, "URI")
+                                ?: error("HLS AES-128 缺少金鑰 URI")
                             currentKey = HlsKey(
                                 method = method,
                                 uri = resolve(baseUrl, keyUri),
                                 iv = attribute(attrs, "IV")?.let(::hexIv),
                             )
                         }
+                        else -> error("不支援的 HLS 加密方式：$method")
                     }
                 }
 
