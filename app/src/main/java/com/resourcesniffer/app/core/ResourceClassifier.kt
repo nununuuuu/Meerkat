@@ -47,7 +47,7 @@ object ResourceClassifier {
         return Classification(ResourceType.OTHER)
     }
 
-    private fun extensionFromUrl(url: String?): String {
+    fun extensionFromUrl(url: String?): String {
         if (url.isNullOrBlank()) return ""
         val uri = runCatching { Uri.parse(url) }.getOrNull()
         val candidates = buildList {
