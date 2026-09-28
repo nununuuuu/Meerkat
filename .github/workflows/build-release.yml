@@ -36,6 +36,7 @@ jobs:
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "ndk;27.2.12479018"
+          "$SDKMANAGER" "platforms;android-37.2"
 
       - name: Vendor Cat Catch 2.7.2
         run: |
