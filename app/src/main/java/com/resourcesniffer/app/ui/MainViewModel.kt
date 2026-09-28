@@ -9,16 +9,19 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import com.resourcesniffer.app.capture.SnifferVpnService
 import com.resourcesniffer.app.core.InstalledApp
+import com.resourcesniffer.app.core.MediaIdentity
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceClassifier
 import com.resourcesniffer.app.core.ResourceType
+import com.resourcesniffer.app.core.ResourceValidator
 import com.resourcesniffer.app.overlay.OverlayService
 import com.resourcesniffer.app.repository.SnifferRepository
 import com.resourcesniffer.app.repository.SessionStore
 import java.util.concurrent.atomic.AtomicLong
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
-    val resources = SnifferRepository.resources
+    val resources = SnifferRepository.preferredResources
+    val rawResources = SnifferRepository.resources
     val currentSession = SessionStore.current
     private val ids = AtomicLong(System.currentTimeMillis())
 
@@ -34,14 +37,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (classification.type == ResourceType.OTHER) return
 
         val parsed = runCatching { Uri.parse(url) }.getOrNull()
-        val extension = parsed?.lastPathSegment
-            ?.substringAfterLast('.', "")
-            ?.lowercase()
-            ?.takeIf { it.isNotBlank() }
+        val extension = ResourceClassifier.extensionFromUrl(url).ifBlank { null }
 
         val session = SessionStore.ensureBrowserSession()
-        SnifferRepository.add(
-            Resource(
+        val resource = Resource(
                 id = ids.getAndIncrement(),
                 sessionId = session.id,
                 sourceAppPackage = null,
@@ -59,8 +58,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 width = width,
                 height = height,
                 durationMs = durationMs,
+                mediaGroupKey = MediaIdentity.groupKey(url),
             )
-        )
+        SnifferRepository.add(resource)
+        ResourceValidator.validate(resource) { validated ->
+            SnifferRepository.add(validated)
+        }
     }
 
     fun installedApps(): List<InstalledApp> {
