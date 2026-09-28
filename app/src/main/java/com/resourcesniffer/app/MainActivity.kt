@@ -27,6 +27,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -168,12 +170,6 @@ private fun MeerkatApp(
                         onClick = { mode = MainMode.BROWSER },
                         icon = { Icon(Icons.Default.Public, null) },
                         label = { Text("瀏覽器") },
-                    )
-                    NavigationBarItem(
-                        selected = mode == MainMode.EXTERNAL,
-                        onClick = { mode = MainMode.EXTERNAL },
-                        icon = { Icon(Icons.Default.Apps, null) },
-                        label = { Text("外部 App") },
                     )
                     NavigationBarItem(
                         selected = mode == MainMode.RESOURCES,
@@ -590,11 +586,29 @@ private fun ResourcePane(
                 (query.isBlank() ||
                     resource.url.orEmpty().contains(query, true) ||
                     resource.host.contains(query, true))
-        }
+        }.sortedWith(
+            compareBy<Resource> {
+                when (it.type) {
+                    ResourceType.VIDEO, ResourceType.STREAM -> 0
+                    ResourceType.IMAGE -> 1
+                    ResourceType.AUDIO -> 2
+                    ResourceType.DOCUMENT -> 3
+                    ResourceType.ARCHIVE -> 4
+                    ResourceType.OTHER -> 5
+                }
+            }.thenByDescending {
+                (it.width?.toLong() ?: 0L) * (it.height?.toLong() ?: 0L)
+            }.thenByDescending { it.contentLength ?: 0L }
+        )
     }
 
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             FilterChip(
                 selected = currentOnly,
                 onClick = { currentOnly = !currentOnly },
@@ -616,7 +630,12 @@ private fun ResourcePane(
             singleLine = true,
         )
 
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             listOf(
                 null to "全部",
                 ResourceType.IMAGE to "圖片",
