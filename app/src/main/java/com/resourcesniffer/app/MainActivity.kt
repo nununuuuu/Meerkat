@@ -86,9 +86,11 @@ class MainActivity : ComponentActivity() {
         if (intent == null) return null
         if (intent.action == Intent.ACTION_VIEW) return intent.dataString
         if (intent.action == Intent.ACTION_SEND) {
-            return intent.getStringExtra(Intent.EXTRA_TEXT)
-                ?.trim()
-                ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+            val text = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+            return Regex("""https?://[^\s]+""", RegexOption.IGNORE_CASE)
+                .find(text)
+                ?.value
+                ?.trimEnd('.', ',', ')', ']', '}', '>', '，', '。')
         }
         return null
     }
@@ -201,6 +203,9 @@ private fun MeerkatApp(
                         onAddressChange = { address = it },
                         onWebViewReady = { webView = it },
                         viewModel = viewModel,
+                        resources = resources,
+                        currentSessionId = currentSession?.id,
+                        onOpenResources = { mode = MainMode.RESOURCES },
                     )
                     MainMode.EXTERNAL -> ExternalAppPane(
                         apps = apps,
@@ -261,6 +266,9 @@ private fun BrowserPane(
     onAddressChange: (String) -> Unit,
     onWebViewReady: (WebView) -> Unit,
     viewModel: MainViewModel,
+    resources: List<Resource>,
+    currentSessionId: Long?,
+    onOpenResources: () -> Unit,
 ) {
     var localAddress by remember(address) { mutableStateOf(address) }
     var webView by remember { mutableStateOf<WebView?>(null) }
@@ -268,15 +276,39 @@ private fun BrowserPane(
     var progress by remember { mutableIntStateOf(0) }
     var pageError by remember { mutableStateOf<String?>(null) }
 
+    val liveResources = remember(resources, currentSessionId) {
+        if (currentSessionId == null) emptyList()
+        else resources.filter { it.sessionId == currentSessionId }
+    }
+    val imageCount = liveResources.count { it.type == ResourceType.IMAGE }
+    val videoCount = liveResources.count {
+        it.type == ResourceType.VIDEO || it.type == ResourceType.STREAM
+    }
+
     Column(
         Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(
-            "內建瀏覽器可直接看到 HTTPS 資源請求，登入網站後可用「掃描目前頁面」補抓動態資源。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surfaceVariant,
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "自動嗅探",
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                AssistChip(onClick = {}, label = { Text("圖片 $imageCount") })
+                AssistChip(onClick = {}, label = { Text("影片 $videoCount") })
+                TextButton(onClick = onOpenResources) { Text("查看") }
+            }
+        }
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -394,7 +426,7 @@ private fun BrowserPane(
                             val headers = req.requestHeaders.orEmpty()
                             viewModel.recordWebResource(
                                 url = url,
-                                mimeType = mimeHint(headers["Accept"]),
+                                mimeType = null,
                                 requestHeaders = headers,
                             )
                             return null
@@ -986,26 +1018,84 @@ private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
     val script = """
         (function() {
           const map = new Map();
+
+          function abs(url) {
+            if (!url) return null;
+            try { return new URL(url, document.baseURI).href; } catch (_) { return null; }
+          }
+
           function put(url, kind, w, h, duration) {
-            if (!url) return;
+            url = abs(url);
+            if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) return;
             const old = map.get(url) || {url:url, kind:null, width:null, height:null, duration:null};
             if (kind) old.kind = kind;
-            if (w > 0) old.width = w;
-            if (h > 0) old.height = h;
-            if (isFinite(duration) && duration > 0) old.duration = duration;
+            if (Number(w) > Number(old.width || 0)) old.width = Number(w);
+            if (Number(h) > Number(old.height || 0)) old.height = Number(h);
+            if (isFinite(duration) && Number(duration) > Number(old.duration || 0)) old.duration = Number(duration);
             map.set(url, old);
           }
 
+          function srcsetEntries(value) {
+            if (!value) return [];
+            return value.split(',').map(part => {
+              const bits = part.trim().split(/\s+/);
+              const descriptor = bits[1] || '';
+              const width = descriptor.endsWith('w') ? parseInt(descriptor, 10) : null;
+              return { url: bits[0], width: width };
+            });
+          }
+
           performance.getEntriesByType('resource').forEach(e => put(e.name, null, null, null, null));
-          document.querySelectorAll('img[src]').forEach(e => put(e.currentSrc || e.src, 'image', e.naturalWidth, e.naturalHeight, null));
-          document.querySelectorAll('video[src],video source[src]').forEach(e => {
-            const video = e.tagName === 'VIDEO' ? e : e.closest('video');
-            put(e.currentSrc || e.src, 'video', video ? video.videoWidth : null, video ? video.videoHeight : null, video ? video.duration : null);
+
+          document.querySelectorAll('img').forEach(e => {
+            put(e.currentSrc || e.src, 'image', e.naturalWidth, e.naturalHeight, null);
+            srcsetEntries(e.getAttribute('srcset')).forEach(x =>
+              put(x.url, 'image', x.width, e.naturalHeight, null)
+            );
           });
-          document.querySelectorAll('audio[src],audio source[src]').forEach(e => {
-            const audio = e.tagName === 'AUDIO' ? e : e.closest('audio');
-            put(e.currentSrc || e.src, 'audio', null, null, audio ? audio.duration : null);
+
+          document.querySelectorAll('picture source[srcset]').forEach(e => {
+            srcsetEntries(e.getAttribute('srcset')).forEach(x =>
+              put(x.url, 'image', x.width, null, null)
+            );
           });
+
+          document.querySelectorAll('video').forEach(video => {
+            put(video.currentSrc || video.src, 'video', video.videoWidth, video.videoHeight, video.duration);
+            if (video.poster) put(video.poster, 'image', video.videoWidth, video.videoHeight, null);
+            video.querySelectorAll('source[src]').forEach(e =>
+              put(e.src, 'video', video.videoWidth, video.videoHeight, video.duration)
+            );
+          });
+
+          document.querySelectorAll('audio').forEach(audio => {
+            put(audio.currentSrc || audio.src, 'audio', null, null, audio.duration);
+            audio.querySelectorAll('source[src]').forEach(e =>
+              put(e.src, 'audio', null, null, audio.duration)
+            );
+          });
+
+          [
+            ['meta[property="og:image"]', 'image'],
+            ['meta[property="og:image:url"]', 'image'],
+            ['meta[name="twitter:image"]', 'image'],
+            ['meta[property="og:video"]', 'video'],
+            ['meta[property="og:video:url"]', 'video'],
+            ['meta[property="og:video:secure_url"]', 'video']
+          ].forEach(pair => {
+            document.querySelectorAll(pair[0]).forEach(e => put(e.content, pair[1], null, null, null));
+          });
+
+          document.querySelectorAll('*').forEach(e => {
+            const bg = getComputedStyle(e).backgroundImage;
+            if (!bg || bg === 'none') return;
+            const matches = bg.match(/url\((['"]?)(.*?)\1\)/g) || [];
+            matches.forEach(m => {
+              const hit = m.match(/url\((['"]?)(.*?)\1\)/);
+              if (hit && hit[2]) put(hit[2], 'image', null, null, null);
+            });
+          });
+
           document.querySelectorAll('a[href]').forEach(e => put(e.href, null, null, null, null));
           return JSON.stringify(Array.from(map.values()));
         })();
@@ -1049,19 +1139,6 @@ private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
                 }
             }
         }
-    }
-}
-
-private fun mimeHint(accept: String?): String? {
-    val value = accept?.lowercase() ?: return null
-    return when {
-        value.contains("image/") -> "image/*"
-        value.contains("video/") -> "video/*"
-        value.contains("audio/") -> "audio/*"
-        value.contains("application/pdf") -> "application/pdf"
-        value.contains("mpegurl") -> "application/vnd.apple.mpegurl"
-        value.contains("dash+xml") -> "application/dash+xml"
-        else -> null
     }
 }
 
