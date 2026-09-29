@@ -65,7 +65,7 @@ class OverlayService : Service() {
             NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_menu_view)
                 .setContentTitle("Meerkat 資源面板")
-                .setContentText("顯示 Meerkat 已抓到的圖片與影片")
+                .setContentText("顯示 Meerkat 已抓到的圖片、影片、文件與其他資源")
                 .setOngoing(true)
                 .setContentIntent(
                     PendingIntent.getActivity(
@@ -245,13 +245,22 @@ class OverlayService : Service() {
     }
 
     private fun buildSummary(items: List<com.resourcesniffer.app.core.Resource>): String {
-        fun count(type: ResourceType) = items.count { it.type == type }
         if (items.isEmpty()) {
-            return "目前沒有已抓到的資源\n請先在 Meerkat 瀏覽器載入頁面"
+            return "目前沒有已抓到的資源"
         }
-        return "圖片 ${count(ResourceType.IMAGE)}　影片 ${count(ResourceType.VIDEO)}\n" +
-            "音訊 ${count(ResourceType.AUDIO)}　串流 ${count(ResourceType.STREAM)}\n" +
-            "文件 ${count(ResourceType.DOCUMENT)}　總計 ${items.size}"
+        val imageCount = items.count { it.type == ResourceType.IMAGE }
+        val videoCount = items.count {
+            it.type == ResourceType.VIDEO || it.type == ResourceType.STREAM
+        }
+        val documentCount = items.count { it.type == ResourceType.DOCUMENT }
+        val otherCount = items.count {
+            it.type == ResourceType.AUDIO ||
+                it.type == ResourceType.ARCHIVE ||
+                it.type == ResourceType.OTHER
+        }
+        return "圖片 $imageCount　影片 $videoCount\n" +
+            "文件 $documentCount　其他 $otherCount\n" +
+            "總計 ${items.size}"
     }
 
     override fun onDestroy() {
