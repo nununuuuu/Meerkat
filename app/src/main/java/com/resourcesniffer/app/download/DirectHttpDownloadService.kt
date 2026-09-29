@@ -128,7 +128,7 @@ class DirectHttpDownloadService : Service() {
         var connection = openConnection(record, resumeFrom)
         var code = connection.responseCode
 
-        if (code == HttpURLConnection.HTTP_REQUESTED_RANGE_NOT_SATISFIABLE) {
+        if (code == 416) {
             val total = connection.getHeaderField("Content-Range")
                 ?.substringAfterLast('/')
                 ?.toLongOrNull()
