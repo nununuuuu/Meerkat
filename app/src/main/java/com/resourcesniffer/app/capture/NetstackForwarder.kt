@@ -1,6 +1,7 @@
 package com.resourcesniffer.app.capture
 
 import android.net.VpnService
+import java.io.File
 import dev.netvalve.bridge.Bridge
 import dev.netvalve.bridge.Handler
 import dev.netvalve.bridge.TCPConn
@@ -76,7 +77,11 @@ class NetstackForwarder(
         }
         val socket = Socket()
         openSockets += socket
-        val inspector = HttpResourceStreamInspector(sourcePackage, sourceName)
+        val inspector = HttpResourceStreamInspector(
+            sourcePackage,
+            sourceName,
+            responseCacheDir = File(vpnService.filesDir, "captured-responses"),
+        )
         try {
             if (!vpnService.protect(socket)) return
             socket.tcpNoDelay = true
