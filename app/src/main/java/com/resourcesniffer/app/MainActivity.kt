@@ -832,21 +832,53 @@ private fun BrowserPane(
                             view: WebView?,
                             request: WebResourceRequest?,
                         ): Boolean {
-                            val raw = request?.url?.toString() ?: return false
-                            val scheme = request.url.scheme?.lowercase()
-                            if (scheme == "http" || scheme == "https") return false
+                            val req = request ?: return false
+                            val raw = req.url.toString()
+                            val scheme = req.url.scheme?.lowercase()
+                            val currentUrl = view?.url
+
+                            // Instagram repeatedly tries to leave mobile web for its app/store.
+                            // Keep the user in Meerkat instead of following that redirect loop.
+                            if (
+                                isInstagramHost(currentUrl) &&
+                                (
+                                    scheme == "instagram" ||
+                                        scheme == "market" ||
+                                        isInstagramStoreUrl(raw)
+                                )
+                            ) {
+                                pageError = null
+                                return true
+                            }
+
+                            if (scheme == "http" || scheme == "https") {
+                                // Play Store can also arrive as an HTTPS browser fallback.
+                                if (isInstagramHost(currentUrl) && isInstagramStoreUrl(raw)) {
+                                    pageError = null
+                                    return true
+                                }
+                                return false
+                            }
 
                             val fallback = resolveBrowsableUrl(raw)
                             if (!fallback.isNullOrBlank()) {
                                 pageError = null
+
+                                // If Instagram is already displaying the corresponding web page,
+                                // swallowing the deep link is enough. Reloading it would retrigger
+                                // the same app-link script and create an endless refresh loop.
+                                if (isInstagramHost(currentUrl) && sameBrowserTarget(currentUrl, fallback)) {
+                                    return true
+                                }
+
                                 localAddress = fallback
                                 onAddressChange(fallback)
                                 view?.loadUrl(fallback)
                                 return true
                             }
 
-                            // Unknown app/deep-link schemes should not be handed back to WebView.
-                            pageError = "此連結是 App 深層連結，Meerkat 已阻止 WebView 直接載入：$scheme"
+                            // Unknown app/deep-link schemes should never be handed to WebView.
+                            pageError = "此連結是 App 深層連結，Meerkat 已阻止外部跳轉：$scheme"
                             return true
                         }
 
@@ -1832,18 +1864,8 @@ private fun resolveBrowsableUrl(raw: String): String? {
     }
 
     if (trimmed.startsWith("intent://", true)) {
-        val parsed = runCatching {
-            Intent.parseUri(trimmed, Intent.URI_INTENT_SCHEME)
-        }.getOrNull()
-
-        parsed?.getStringExtra("browser_fallback_url")
-            ?.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }
-            ?.let { return it }
-
-        parsed?.dataString
-            ?.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }
-            ?.let { return it }
-
+        // Prefer reconstructing the original web target. App-provided
+        // browser_fallback_url often points to Play Store and causes a loop.
         val body = trimmed
             .substringAfter("intent://")
             .substringBefore("#Intent;")
@@ -1851,9 +1873,74 @@ private fun resolveBrowsableUrl(raw: String): String? {
         if (body.isNotBlank() && body.substringBefore('/').contains('.')) {
             return "https://$body"
         }
+
+        val parsed = runCatching {
+            Intent.parseUri(trimmed, Intent.URI_INTENT_SCHEME)
+        }.getOrNull()
+
+        parsed?.dataString
+            ?.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }
+            ?.takeUnless(::isInstagramStoreUrl)
+            ?.let { return it }
+
+        parsed?.getStringExtra("browser_fallback_url")
+            ?.takeIf { it.startsWith("http://", true) || it.startsWith("https://", true) }
+            ?.takeUnless(::isInstagramStoreUrl)
+            ?.let { return it }
+    }
+
+    if (trimmed.startsWith("instagram://", true)) {
+        val uri = runCatching { Uri.parse(trimmed) }.getOrNull() ?: return null
+        val host = uri.host.orEmpty().lowercase()
+        val path = uri.path.orEmpty().trim('/')
+        val id = uri.getQueryParameter("id")
+            ?: uri.getQueryParameter("shortcode")
+            ?: path.takeIf { it.isNotBlank() }
+
+        return when (host) {
+            "reel", "reels" -> id?.let { "https://www.instagram.com/reel/$it/" }
+            "p", "media" -> id?.let { "https://www.instagram.com/p/$it/" }
+            "user", "profile" -> uri.getQueryParameter("username")
+                ?.let { "https://www.instagram.com/$it/" }
+            else -> null
+        }
     }
 
     return null
+}
+
+private fun isInstagramHost(url: String?): Boolean {
+    val host = runCatching { Uri.parse(url).host?.lowercase() }.getOrNull() ?: return false
+    return host == "instagram.com" ||
+        host == "www.instagram.com" ||
+        host.endsWith(".instagram.com")
+}
+
+private fun isInstagramStoreUrl(url: String): Boolean {
+    val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return false
+    val scheme = uri.scheme?.lowercase()
+    if (scheme == "market") {
+        return uri.getQueryParameter("id") == "com.instagram.android"
+    }
+
+    val host = uri.host?.lowercase().orEmpty()
+    if (host != "play.google.com") return false
+    if (!uri.path.orEmpty().startsWith("/store/apps/")) return false
+    return uri.getQueryParameter("id") == "com.instagram.android" ||
+        url.contains("com.instagram.android", ignoreCase = true)
+}
+
+private fun sameBrowserTarget(a: String?, b: String?): Boolean {
+    if (a.isNullOrBlank() || b.isNullOrBlank()) return false
+    fun canonical(value: String): String {
+        val uri = runCatching { Uri.parse(value) }.getOrNull() ?: return value
+        return uri.buildUpon()
+            .fragment(null)
+            .build()
+            .toString()
+            .trimEnd('/')
+    }
+    return canonical(a).equals(canonical(b), ignoreCase = true)
 }
 
 private fun normalizeUrl(value: String): String {
