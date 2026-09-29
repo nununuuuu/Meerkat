@@ -39,6 +39,8 @@ object DownloadHelper {
             referer = resource.referer,
             userAgent = resource.userAgent,
             localSourcePath = resource.localCachePath,
+            expectedLength = resource.contentLength,
+            etag = resource.etag,
             quality = quality,
             state = DownloadState.QUEUED,
             detail = "等待下載",
