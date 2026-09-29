@@ -18,6 +18,7 @@ data class Resource(
     val mimeType: String?,
     val extension: String?,
     val fileName: String? = null,
+    val localCachePath: String? = null,
     val contentLength: Long?,
     val type: ResourceType,
     val streamType: StreamType? = null,
