@@ -31,6 +31,7 @@ class HlsDownloadService : Service() {
     companion object {
         private const val CHANNEL_ID = "hls_download"
         private const val NOTIFICATION_ID = 2101
+        private const val MAX_MASTER_DEPTH = 4
         const val EXTRA_RECORD_ID = "record_id"
         const val EXTRA_URL = "url"
         const val EXTRA_COOKIE = "cookie"
@@ -116,18 +117,20 @@ class HlsDownloadService : Service() {
         recordId: String?,
         quality: DownloadQuality,
     ): String {
-        val rootManifest = fetchText(initialUrl, headers)
-        val selection = chooseSelection(rootManifest, initialUrl, quality)
-
-        val videoPlaylistUrl = selection?.variant?.url ?: initialUrl
-        val videoManifest = if (videoPlaylistUrl == initialUrl) rootManifest else fetchText(videoPlaylistUrl, headers)
+        val resolved = resolveMediaSelection(
+            initialUrl = initialUrl,
+            headers = headers,
+            quality = quality,
+        )
+        val videoPlaylistUrl = resolved.videoUrl
+        val videoManifest = resolved.videoManifest
         val videoPlaylist = parseMediaPlaylist(videoManifest, videoPlaylistUrl)
         require(videoPlaylist.segments.isNotEmpty()) { "找不到可下載的 HLS 視訊分段" }
 
-        val audioUrl = selection?.audio?.uri
+        val audioUrl = resolved.audio?.uri
         if (audioUrl.isNullOrBlank()) {
             val localUri = writeSinglePlaylist(videoPlaylist, headers, recordId)
-            saveSubtitleSidecar(selection?.subtitle, headers, recordId)
+            saveSubtitleSidecar(resolved.subtitle, headers, recordId)
             return localUri
         }
 
@@ -278,6 +281,57 @@ class HlsDownloadService : Service() {
         val audio: MasterMedia?,
         val subtitle: MasterMedia?,
     )
+
+    private data class ResolvedMediaSelection(
+        val videoUrl: String,
+        val videoManifest: String,
+        val audio: MasterMedia?,
+        val subtitle: MasterMedia?,
+    )
+
+    private fun resolveMediaSelection(
+        initialUrl: String,
+        headers: Map<String, String>,
+        quality: DownloadQuality,
+    ): ResolvedMediaSelection {
+        var currentUrl = initialUrl
+        var currentManifest = fetchText(currentUrl, headers)
+        var selectedAudio: MasterMedia? = null
+        var selectedSubtitle: MasterMedia? = null
+        val visited = linkedSetOf<String>()
+
+        repeat(MAX_MASTER_DEPTH) {
+            require(visited.add(currentUrl)) { "HLS master playlist 發生循環引用" }
+
+            val master = parseMasterPlaylist(currentManifest, currentUrl)
+            if (master.variants.isEmpty()) {
+                return ResolvedMediaSelection(
+                    videoUrl = currentUrl,
+                    videoManifest = currentManifest,
+                    audio = selectedAudio,
+                    subtitle = selectedSubtitle,
+                )
+            }
+
+            val selection = chooseSelection(currentManifest, currentUrl, quality)
+                ?: error("找不到可用的 HLS 畫質")
+            selectedAudio = selection.audio ?: selectedAudio
+            selectedSubtitle = selection.subtitle ?: selectedSubtitle
+            currentUrl = selection.variant.url
+            currentManifest = fetchText(currentUrl, headers)
+        }
+
+        val finalMaster = parseMasterPlaylist(currentManifest, currentUrl)
+        require(finalMaster.variants.isEmpty()) {
+            "HLS master playlist 巢狀層級超過 " + MAX_MASTER_DEPTH
+        }
+        return ResolvedMediaSelection(
+            videoUrl = currentUrl,
+            videoManifest = currentManifest,
+            audio = selectedAudio,
+            subtitle = selectedSubtitle,
+        )
+    }
 
     private fun chooseSelection(
         manifest: String,
