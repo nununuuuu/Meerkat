@@ -79,6 +79,9 @@ object DownloadRegistry {
                     put("referer", item.referer)
                     put("userAgent", item.userAgent)
                     put("localSourcePath", item.localSourcePath)
+                    put("expectedLength", item.expectedLength)
+                    put("etag", item.etag)
+                    put("lastModified", item.lastModified)
                     put("quality", item.quality.name)
                     put("state", item.state.name)
                     put("progress", item.progress)
@@ -117,6 +120,9 @@ object DownloadRegistry {
                             referer = nullableString(item, "referer"),
                             userAgent = nullableString(item, "userAgent"),
                             localSourcePath = nullableString(item, "localSourcePath"),
+                            expectedLength = if (item.isNull("expectedLength")) null else item.optLong("expectedLength"),
+                            etag = nullableString(item, "etag"),
+                            lastModified = nullableString(item, "lastModified"),
                             quality = nullableString(item, "quality")
                                 ?.let { runCatching { DownloadQuality.valueOf(it) }.getOrNull() }
                                 ?: DownloadQuality.HIGH,
