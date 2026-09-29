@@ -107,7 +107,7 @@ class LocalMitmProxy(
         ) as SSLSocket
         clientTls.useClientMode = false
         clientTls.sslParameters = clientTls.sslParameters.apply {
-            applicationProtocols = arrayOf("http/1.1")
+            applicationProtocols = arrayOf("h2", "http/1.1")
         }
 
         val upstreamBase = Socket()
@@ -133,12 +133,21 @@ class LocalMitmProxy(
                 throw error
             }
             upstreamTls.startHandshake()
-            val inspector = HttpResourceStreamInspector(
-                sourcePackage,
-                sourceName,
-                secure = true,
-                responseCacheDir = File(vpnService.filesDir, "captured-responses"),
-            )
+            val clientProtocol = clientTls.applicationProtocol.orEmpty()
+            val upstreamProtocol = upstreamTls.applicationProtocol.orEmpty()
+            val inspector = if (
+                clientProtocol.equals("http/1.1", true) &&
+                upstreamProtocol.equals("http/1.1", true)
+            ) {
+                HttpResourceStreamInspector(
+                    sourcePackage,
+                    sourceName,
+                    secure = true,
+                    responseCacheDir = File(vpnService.filesDir, "captured-responses"),
+                )
+            } else {
+                null
+            }
             relay(
                 BufferedInputStream(clientTls.inputStream), BufferedOutputStream(clientTls.outputStream),
                 BufferedInputStream(upstreamTls.inputStream), BufferedOutputStream(upstreamTls.outputStream),
@@ -203,7 +212,7 @@ class LocalMitmProxy(
     private fun relay(
         clientIn: BufferedInputStream, clientOut: BufferedOutputStream,
         upstreamIn: BufferedInputStream, upstreamOut: BufferedOutputStream,
-        inspector: HttpResourceStreamInspector,
+        inspector: HttpResourceStreamInspector?,
     ) {
         val closed = AtomicBoolean(false)
         val up = Thread {
@@ -212,7 +221,7 @@ class LocalMitmProxy(
                 while (!stopped.get() && !closed.get()) {
                     val n = clientIn.read(buffer)
                     if (n <= 0) break
-                    inspector.onClientBytes(buffer, n)
+                    inspector?.onClientBytes(buffer, n)
                     upstreamOut.write(buffer, 0, n)
                     upstreamOut.flush()
                 }
@@ -228,7 +237,7 @@ class LocalMitmProxy(
                 while (!stopped.get() && !closed.get()) {
                     val n = upstreamIn.read(buffer)
                     if (n <= 0) break
-                    inspector.onServerBytes(buffer, n)
+                    inspector?.onServerBytes(buffer, n)
                     clientOut.write(buffer, 0, n)
                     clientOut.flush()
                 }
