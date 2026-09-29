@@ -78,6 +78,7 @@ object DownloadRegistry {
                     put("cookie", item.cookie)
                     put("referer", item.referer)
                     put("userAgent", item.userAgent)
+                    put("localSourcePath", item.localSourcePath)
                     put("quality", item.quality.name)
                     put("state", item.state.name)
                     put("progress", item.progress)
@@ -115,6 +116,7 @@ object DownloadRegistry {
                             cookie = nullableString(item, "cookie"),
                             referer = nullableString(item, "referer"),
                             userAgent = nullableString(item, "userAgent"),
+                            localSourcePath = nullableString(item, "localSourcePath"),
                             quality = nullableString(item, "quality")
                                 ?.let { runCatching { DownloadQuality.valueOf(it) }.getOrNull() }
                                 ?: DownloadQuality.HIGH,
