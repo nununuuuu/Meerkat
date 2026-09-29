@@ -144,10 +144,11 @@ private fun MeerkatApp(
     val downloads by DownloadRegistry.items.collectAsStateWithLifecycle()
     val currentSession by viewModel.currentSession.collectAsStateWithLifecycle()
     val browserSession by viewModel.browserSession.collectAsStateWithLifecycle()
+    val externalSession by viewModel.externalSession.collectAsStateWithLifecycle()
+    val externalCaptureActive = externalSession != null
     var mode by remember { mutableStateOf(if (incomingUrl != null) MainMode.BROWSER else MainMode.RESOURCES) }
     var address by remember { mutableStateOf(incomingUrl.orEmpty()) }
     var webView by remember { mutableStateOf<WebView?>(null) }
-    var externalCaptureActive by remember { mutableStateOf(false) }
     var mitmCaInstalled by remember { mutableStateOf(viewModel.isMitmCaInstalled()) }
 
     val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -162,7 +163,6 @@ private fun MeerkatApp(
 
     val beginGlobalCapture: () -> Unit = {
         viewModel.startExternalCapture()
-        externalCaptureActive = true
         if (Settings.canDrawOverlays(context)) {
             viewModel.startOverlay()
         } else {
@@ -274,7 +274,6 @@ private fun MeerkatApp(
                         },
                         onStop = {
                             viewModel.stopExternalCapture()
-                            externalCaptureActive = false
                         },
                         caInstalled = mitmCaInstalled,
                         caFingerprint = viewModel.mitmCaFingerprint(),
