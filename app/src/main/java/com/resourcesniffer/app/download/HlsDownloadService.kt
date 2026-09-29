@@ -162,7 +162,7 @@ class HlsDownloadService : Service() {
                 "Meerkat-" + System.currentTimeMillis() + ".mp4",
                 "video/mp4",
             )
-            saveSubtitleSidecar(selection?.subtitle, headers, recordId)
+            saveSubtitleSidecar(resolved.subtitle, headers, recordId)
             return localUri
         } finally {
             videoTemp.delete()
