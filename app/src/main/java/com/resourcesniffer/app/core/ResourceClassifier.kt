@@ -6,7 +6,14 @@ object ResourceClassifier {
     private val imageExt = setOf("jpg", "jpeg", "png", "webp", "gif", "avif", "bmp", "svg", "heic", "heif")
     private val videoExt = setOf("mp4", "webm", "mkv", "mov", "m4v", "avi", "ts", "m2ts")
     private val audioExt = setOf("mp3", "m4a", "aac", "ogg", "opus", "flac", "wav")
-    private val docExt = setOf("pdf", "epub", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "rtf")
+    private val docExt = setOf(
+        "pdf", "epub",
+        "doc", "docx", "docm", "dot", "dotx", "dotm",
+        "xls", "xlsx", "xlsm", "xlsb", "xlt", "xltx", "xltm",
+        "ppt", "pptx", "pptm", "pps", "ppsx", "ppsm", "pot", "potx", "potm",
+        "odt", "ods", "odp", "pages", "numbers", "key",
+        "txt", "csv", "tsv", "rtf", "md",
+    )
     private val archiveExt = setOf("zip", "rar", "7z", "tar", "gz", "bz2", "xz")
 
     data class Classification(val type: ResourceType, val streamType: StreamType? = null)
@@ -27,11 +34,22 @@ object ResourceClassifier {
 
         val documentMime = mime == "application/pdf" ||
             mime == "application/epub+zip" ||
-            mime.startsWith("application/msword") ||
+            mime == "application/msword" ||
+            mime == "application/rtf" ||
+            mime == "application/vnd.ms-excel" ||
+            mime == "application/vnd.ms-powerpoint" ||
             mime.contains("officedocument") ||
+            mime.contains("ms-word") ||
+            mime.contains("ms-excel") ||
+            mime.contains("ms-powerpoint") ||
+            mime.startsWith("application/vnd.oasis.opendocument.") ||
+            mime == "application/vnd.apple.pages" ||
+            mime == "application/vnd.apple.numbers" ||
+            mime == "application/vnd.apple.keynote" ||
             mime == "text/plain" ||
             mime == "text/csv" ||
-            mime == "application/rtf"
+            mime == "text/tab-separated-values" ||
+            mime == "text/markdown"
         if (documentMime || ext in docExt) return Classification(ResourceType.DOCUMENT)
 
         val archiveMime = mime in setOf(
