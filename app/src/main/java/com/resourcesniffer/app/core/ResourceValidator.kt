@@ -82,7 +82,6 @@ object ResourceValidator {
                     classification.type == ResourceType.IMAGE
 
             var sniffedType: ResourceType? = null
-            var sniffedMime: String? = null
             var sniffedExtension: String? = null
 
             if (needsProbe) {
@@ -134,7 +133,6 @@ object ResourceValidator {
                             }
                             sniffSignature(prefix)?.let { sniff ->
                                 sniffedType = sniff.type
-                                sniffedMime = sniff.mime
                                 sniffedExtension = sniff.extension
                                 if (mime.isNullOrBlank() || mime.equals("application/octet-stream", true)) {
                                     mime = sniff.mime
