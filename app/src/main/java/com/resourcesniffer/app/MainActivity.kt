@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceError
 import android.webkit.WebChromeClient
@@ -275,6 +276,140 @@ private fun MeerkatApp(
     }
 }
 
+private class BrowserCaptureBridge(
+    private val viewModel: MainViewModel,
+    private val userAgent: String,
+) {
+    @JavascriptInterface
+    fun resource(url: String?, mimeType: String?, referer: String?) {
+        val target = url?.trim().orEmpty()
+        if (!target.startsWith("http://", true) && !target.startsWith("https://", true)) return
+        viewModel.recordWebResource(
+            url = target,
+            mimeType = mimeType?.takeIf { it.isNotBlank() && it != "null" },
+            requestHeaders = mapOf(
+                "Referer" to referer.orEmpty(),
+                "User-Agent" to userAgent,
+                "Cookie" to (CookieManager.getInstance().getCookie(target) ?: ""),
+            ),
+        )
+    }
+}
+
+private fun installBrowserCapture(webView: WebView) {
+    val script = """
+        (function() {
+          if (window.__meerkatCaptureInstalled) return;
+          window.__meerkatCaptureInstalled = true;
+
+          const MAX_TEXT = 1024 * 1024;
+          const RESOURCE_RE = /(?:https?:\\/\\/[^\\s"\'<>\\\\]+)|(?:["\']?([^"\']+\\.(?:m3u8|mpd|mp4|m4v|webm|mkv|mov|avi|m4a|mp3|aac|flac|ogg|opus|wav|jpg|jpeg|png|webp|gif|avif|bmp|svg|heic|heif|pdf|epub|doc|docx|docm|dot|dotx|xls|xlsx|xlsm|xlsb|ppt|pptx|pptm|pps|ppsx|odt|ods|odp|pages|numbers|key|txt|csv|tsv|rtf|md|zip|rar|7z|tar|gz)(?:\\?[^"\'\\s<>]*)?))/ig;
+
+          function absolute(value) {
+            if (!value) return null;
+            try { return new URL(String(value), document.baseURI).href; } catch (_) { return null; }
+          }
+
+          function report(value, mime) {
+            const url = absolute(value);
+            if (!url || (!url.startsWith("http://") && !url.startsWith("https://"))) return;
+            try { MeerkatCapture.resource(url, mime || "", location.href); } catch (_) {}
+          }
+
+          function scanText(value) {
+            if (typeof value !== "string" || !value) return;
+            let text = value.length > MAX_TEXT ? value.slice(0, MAX_TEXT) : value;
+            text = text.replace(/\\\\\\//g, "/").replace(/\\\\u002[fF]/g, "/").replace(/&amp;/g, "&");
+            RESOURCE_RE.lastIndex = 0;
+            let match, count = 0;
+            while ((match = RESOURCE_RE.exec(text)) && count < 256) {
+              const raw = match[0].replace(/^[\'"]|[\'",;)}\\]]+$/g, "");
+              report(raw, "");
+              count++;
+            }
+          }
+
+          const originalFetch = window.fetch;
+          if (originalFetch) {
+            window.fetch = function(input, init) {
+              try { report(typeof input === "string" ? input : input && input.url, ""); } catch (_) {}
+              return originalFetch.apply(this, arguments).then(function(response) {
+                try {
+                  report(response.url, response.headers && response.headers.get("content-type"));
+                  const ct = (response.headers && response.headers.get("content-type") || "").toLowerCase();
+                  if (ct.includes("json") || ct.startsWith("text/") || ct.includes("javascript") || ct.includes("xml")) {
+                    response.clone().text().then(scanText).catch(function(){});
+                  }
+                } catch (_) {}
+                return response;
+              });
+            };
+          }
+
+          const originalOpen = XMLHttpRequest.prototype.open;
+          const originalSend = XMLHttpRequest.prototype.send;
+          XMLHttpRequest.prototype.open = function(method, url) {
+            this.__meerkatUrl = absolute(url);
+            if (this.__meerkatUrl) report(this.__meerkatUrl, "");
+            return originalOpen.apply(this, arguments);
+          };
+          XMLHttpRequest.prototype.send = function() {
+            this.addEventListener("load", function() {
+              try {
+                const ct = this.getResponseHeader("content-type") || "";
+                report(this.responseURL || this.__meerkatUrl, ct);
+                if ((ct.includes("json") || ct.startsWith("text/") || ct.includes("javascript") || ct.includes("xml")) && typeof this.responseText === "string") {
+                  scanText(this.responseText);
+                }
+              } catch (_) {}
+            });
+            return originalSend.apply(this, arguments);
+          };
+
+          const NativeWebSocket = window.WebSocket;
+          if (NativeWebSocket) {
+            window.WebSocket = function(url, protocols) {
+              const ws = protocols === undefined ? new NativeWebSocket(url) : new NativeWebSocket(url, protocols);
+              ws.addEventListener("message", function(event) {
+                if (typeof event.data === "string") scanText(event.data);
+              });
+              return ws;
+            };
+            window.WebSocket.prototype = NativeWebSocket.prototype;
+            Object.defineProperties(window.WebSocket, { CONNECTING:{value:0}, OPEN:{value:1}, CLOSING:{value:2}, CLOSED:{value:3} });
+          }
+
+          if (window.PerformanceObserver) {
+            try {
+              const observer = new PerformanceObserver(function(list) {
+                list.getEntries().forEach(function(entry) { report(entry.name, ""); });
+              });
+              observer.observe({type:"resource", buffered:true});
+            } catch (_) {}
+          }
+
+          function scanNode(node) {
+            if (!node || node.nodeType !== 1) return;
+            ["src","href","poster","data-src","data-url"].forEach(function(attr) {
+              try { if (node.hasAttribute && node.hasAttribute(attr)) report(node.getAttribute(attr), ""); } catch (_) {}
+            });
+            try {
+              if (node.srcset) String(node.srcset).split(",").forEach(function(part) { report(part.trim().split(/\\s+/)[0], ""); });
+            } catch (_) {}
+          }
+
+          try {
+            new MutationObserver(function(records) {
+              records.forEach(function(record) {
+                scanNode(record.target);
+                record.addedNodes && record.addedNodes.forEach(scanNode);
+              });
+            }).observe(document.documentElement || document, {subtree:true, childList:true, attributes:true, attributeFilter:["src","href","poster","srcset","data-src","data-url"]});
+          } catch (_) {}
+        })();
+    """.trimIndent()
+    webView.evaluateJavascript(script, null)
+}
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun BrowserPane(
@@ -413,6 +548,10 @@ private fun BrowserPane(
                     settings.displayZoomControls = false
                     settings.javaScriptCanOpenWindowsAutomatically = true
                     settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                    addJavascriptInterface(
+                        BrowserCaptureBridge(viewModel, settings.userAgentString),
+                        "MeerkatCapture",
+                    )
 
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
@@ -470,6 +609,7 @@ private fun BrowserPane(
                         ) {
                             loading = true
                             pageError = null
+                            view?.post { if (view.isAttachedToWindow) installBrowserCapture(view) }
                             super.onPageStarted(view, url, favicon)
                         }
 
@@ -492,6 +632,7 @@ private fun BrowserPane(
                                 onAddressChange(it)
                             }
                             view?.let { page ->
+                                page.post { if (page.isAttachedToWindow) installBrowserCapture(page) }
                                 page.postDelayed({
                                     if (page.isAttachedToWindow) scanDomResources(page, viewModel)
                                 }, 900)
