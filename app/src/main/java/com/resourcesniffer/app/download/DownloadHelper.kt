@@ -38,6 +38,7 @@ object DownloadHelper {
             cookie = cookie,
             referer = resource.referer,
             userAgent = resource.userAgent,
+            localSourcePath = resource.localCachePath,
             quality = quality,
             state = DownloadState.QUEUED,
             detail = "等待下載",
@@ -73,6 +74,7 @@ object DownloadHelper {
             record.url.substringBefore('?').endsWith(".mpd", true)
 
         when {
+            !record.localSourcePath.isNullOrBlank() -> enqueueLocalCopy(context, record)
             record.mimeType?.startsWith("image/") == true -> enqueueImage(context, record)
             isHls -> {
                 ContextCompat.startForegroundService(
@@ -106,6 +108,66 @@ object DownloadHelper {
         }
     }
 
+    private fun enqueueLocalCopy(context: Context, record: DownloadRecord) {
+        DownloadRegistry.update(record.id) {
+            it.copy(state = DownloadState.DOWNLOADING, progress = 0, detail = "正在保存本機資源")
+        }
+        Thread {
+            var outputUri: Uri? = null
+            try {
+                val source = java.io.File(record.localSourcePath ?: error("缺少本機資源"))
+                require(source.isFile) { "本機暫存資源已不存在" }
+                val resolver = context.contentResolver
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, record.displayName)
+                    put(MediaStore.Downloads.MIME_TYPE, record.mimeType ?: "application/octet-stream")
+                    put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Meerkat")
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                outputUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: error("無法建立下載檔案")
+                resolver.openOutputStream(outputUri, "w")?.use { output ->
+                    source.inputStream().use { input ->
+                        val total = source.length().coerceAtLeast(1L)
+                        val buffer = ByteArray(128 * 1024)
+                        var copied = 0L
+                        while (true) {
+                            if (DownloadRegistry.find(record.id)?.state == DownloadState.CANCELLED) error("下載已取消")
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            if (read == 0) continue
+                            output.write(buffer, 0, read)
+                            copied += read
+                            val progress = ((copied * 100L) / total).toInt().coerceIn(0, 100)
+                            DownloadRegistry.update(record.id) { current ->
+                                current.copy(progress = progress, detail = "正在保存本機資源")
+                            }
+                        }
+                    }
+                } ?: error("無法寫入下載檔案")
+                resolver.update(
+                    outputUri,
+                    ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) },
+                    null,
+                    null,
+                )
+                DownloadRegistry.update(record.id) {
+                    it.copy(
+                        state = DownloadState.COMPLETED,
+                        progress = 100,
+                        detail = "下載完成",
+                        localUri = outputUri.toString(),
+                    )
+                }
+            } catch (error: Throwable) {
+                outputUri?.let { runCatching { context.contentResolver.delete(it, null, null) } }
+                DownloadRegistry.update(record.id) { current ->
+                    if (current.state == DownloadState.CANCELLED) current
+                    else current.copy(state = DownloadState.FAILED, detail = error.message ?: "保存失敗")
+                }
+            }
+        }.start()
+    }
     private fun enqueueImage(context: Context, record: DownloadRecord) {
         DownloadRegistry.update(record.id) {
             it.copy(state = DownloadState.DOWNLOADING, detail = "下載圖片中")
@@ -207,6 +269,7 @@ object DownloadHelper {
             mimeType = record.mimeType,
             extension = null,
             fileName = record.displayName,
+            localCachePath = record.localSourcePath,
             contentLength = null,
             type = when {
                 record.mimeType?.startsWith("image/") == true -> ResourceType.IMAGE
