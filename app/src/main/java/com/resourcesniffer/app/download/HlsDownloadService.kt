@@ -161,8 +161,20 @@ class HlsDownloadService : Service() {
         val audioManifest = fetchText(audioUrl, headers)
         val audioPlaylist = parseMediaPlaylist(audioManifest, audioUrl)
         require(audioPlaylist.segments.isNotEmpty()) { "找不到可下載的 HLS 音訊分段" }
-        require(!videoPlaylist.isLive && !audioPlaylist.isLive) {
-            "此直播使用獨立音訊 playlist；需要同步雙軌時間軸，暫不以快照方式下載"
+
+        if (videoPlaylist.isLive || audioPlaylist.isLive) {
+            val localUri = writeLiveDualPlaylists(
+                videoPlaylistUrl = videoPlaylistUrl,
+                initialVideo = videoPlaylist,
+                audioPlaylistUrl = audioUrl,
+                initialAudio = audioPlaylist,
+                headers = headers,
+                recordId = recordId,
+            )
+            if (!isCancelled(recordId)) {
+                saveSubtitleSidecar(resolved.subtitle, headers, recordId)
+            }
+            return localUri
         }
 
         val stamp = recordId ?: System.currentTimeMillis().toString()
@@ -195,6 +207,158 @@ class HlsDownloadService : Service() {
             videoTemp.delete()
             audioTemp.delete()
             muxed.delete()
+        }
+    }
+
+    private data class LiveTrackState(
+        val seen: LinkedHashSet<String> = linkedSetOf(),
+        var lastInit: RangedResource? = null,
+        var written: Int = 0,
+    )
+
+    private fun writeLiveDualPlaylists(
+        videoPlaylistUrl: String,
+        initialVideo: Playlist,
+        audioPlaylistUrl: String,
+        initialAudio: Playlist,
+        headers: Map<String, String>,
+        recordId: String?,
+    ): String {
+        val stamp = recordId ?: System.currentTimeMillis().toString()
+        val videoTemp = File(cacheDir, "hls-live-" + stamp + "-video.bin")
+        val audioTemp = File(cacheDir, "hls-live-" + stamp + "-audio.bin")
+        val muxed = File(cacheDir, "hls-live-" + stamp + "-muxed.mp4")
+        val videoState = LiveTrackState()
+        val audioState = LiveTrackState()
+        var videoPlaylist = initialVideo
+        var audioPlaylist = initialAudio
+        val startedAt = System.currentTimeMillis()
+
+        try {
+            FileOutputStream(videoTemp, false).use { videoOut ->
+                FileOutputStream(audioTemp, false).use { audioOut ->
+                    while (true) {
+                        writeLiveTrackSegments(
+                            playlist = videoPlaylist,
+                            headers = headers,
+                            output = videoOut,
+                            recordId = recordId,
+                            state = videoState,
+                        )
+                        writeLiveTrackSegments(
+                            playlist = audioPlaylist,
+                            headers = headers,
+                            output = audioOut,
+                            recordId = recordId,
+                            state = audioState,
+                        )
+                        videoOut.flush()
+                        audioOut.flush()
+
+                        recordId?.let { id ->
+                            DownloadRegistry.update(id) { old ->
+                                if (old.state == DownloadState.CANCELLED) old
+                                else old.copy(
+                                    state = DownloadState.DOWNLOADING,
+                                    progress = null,
+                                    detail = "直播錄製中 · V " + videoState.written +
+                                        " / A " + audioState.written + " 分段",
+                                )
+                            }
+                        }
+                        updateLiveNotification(videoState.written + audioState.written)
+
+                        if (isCancelled(recordId)) break
+                        if (videoPlaylist.endList && audioPlaylist.endList) break
+                        if (System.currentTimeMillis() - startedAt >= LIVE_MAX_RECORD_MS) {
+                            recordId?.let { id ->
+                                DownloadRegistry.update(id) { old ->
+                                    old.copy(detail = "已達直播錄製安全上限，正在合併影音")
+                                }
+                            }
+                            break
+                        }
+
+                        val target = listOfNotNull(
+                            videoPlaylist.targetDurationSeconds,
+                            audioPlaylist.targetDurationSeconds,
+                        ).minOrNull() ?: 4.0
+                        val refreshMs = (target * 500.0)
+                            .toLong()
+                            .coerceIn(LIVE_MIN_REFRESH_MS, LIVE_MAX_REFRESH_MS)
+                        Thread.sleep(refreshMs)
+
+                        if (isCancelled(recordId)) break
+                        if (!videoPlaylist.endList) {
+                            videoPlaylist = parseMediaPlaylist(
+                                fetchText(videoPlaylistUrl, headers),
+                                videoPlaylistUrl,
+                            )
+                        }
+                        if (!audioPlaylist.endList) {
+                            audioPlaylist = parseMediaPlaylist(
+                                fetchText(audioPlaylistUrl, headers),
+                                audioPlaylistUrl,
+                            )
+                        }
+                    }
+                    videoOut.fd.sync()
+                    audioOut.fd.sync()
+                }
+            }
+
+            require(videoState.written > 0) { "直播期間沒有取得可保存的 HLS 視訊分段" }
+            require(audioState.written > 0) { "直播期間沒有取得可保存的 HLS 音訊分段" }
+
+            recordId?.let { id ->
+                DownloadRegistry.update(id) { old ->
+                    if (old.state == DownloadState.CANCELLED) old
+                    else old.copy(detail = "直播錄製結束，正在合併影音")
+                }
+            }
+
+            muxTracks(videoTemp, audioTemp, muxed)
+            return copyFileToDownloads(
+                muxed,
+                "Meerkat-live-" + System.currentTimeMillis() + ".mp4",
+                "video/mp4",
+            )
+        } finally {
+            videoTemp.delete()
+            audioTemp.delete()
+            muxed.delete()
+        }
+    }
+
+    private fun writeLiveTrackSegments(
+        playlist: Playlist,
+        headers: Map<String, String>,
+        output: FileOutputStream,
+        recordId: String?,
+        state: LiveTrackState,
+    ) {
+        for (segment in playlist.segments) {
+            if (isCancelled(recordId)) return
+            val identity = segmentIdentity(segment)
+            if (!state.seen.add(identity)) continue
+
+            segment.init?.let { init ->
+                if (init != state.lastInit) {
+                    output.write(fetchBytes(init.url, headers, init.range))
+                    state.lastInit = init
+                }
+            }
+
+            var bytes = fetchBytes(segment.url, headers, segment.range)
+            val key = segment.key
+            if (key != null && key.method.equals("AES-128", true)) {
+                val keyBytes = fetchBytes(key.uri, headers)
+                require(keyBytes.size >= 16) { "HLS 金鑰長度無效" }
+                val iv = key.iv ?: sequenceIv(segment.sequence)
+                bytes = decryptAes128(bytes, keyBytes.copyOf(16), iv)
+            }
+            output.write(bytes)
+            state.written++
         }
     }
 
