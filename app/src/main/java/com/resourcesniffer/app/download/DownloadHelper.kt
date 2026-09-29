@@ -75,7 +75,8 @@ object DownloadHelper {
             record.url.substringBefore('?').endsWith(".mpd", true)
 
         when {
-            !record.localSourcePath.isNullOrBlank() -> enqueueLocalCopy(context, record)
+            !record.localSourcePath.isNullOrBlank() &&
+                java.io.File(record.localSourcePath).isFile -> enqueueLocalCopy(context, record)
             isHls -> {
                 ContextCompat.startForegroundService(
                     context,
