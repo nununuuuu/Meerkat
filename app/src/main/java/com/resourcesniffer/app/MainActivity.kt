@@ -24,8 +24,6 @@ import android.webkit.WebViewClient
 import android.webkit.RenderProcessGoneDetail
 import android.widget.Toast
 import android.widget.ImageView
-import android.widget.VideoView
-import android.widget.MediaController
 import android.graphics.BitmapFactory
 import java.io.File
 import java.io.FileOutputStream
@@ -68,6 +66,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.PlayerView
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.resourcesniffer.app.core.Resource
@@ -138,8 +143,9 @@ private fun MeerkatApp(
     val resources by viewModel.resources.collectAsStateWithLifecycle()
     val downloads by DownloadRegistry.items.collectAsStateWithLifecycle()
     val currentSession by viewModel.currentSession.collectAsStateWithLifecycle()
+    val browserSession by viewModel.browserSession.collectAsStateWithLifecycle()
     var mode by remember { mutableStateOf(if (incomingUrl != null) MainMode.BROWSER else MainMode.RESOURCES) }
-    var address by remember { mutableStateOf(incomingUrl ?: "https://www.google.com/") }
+    var address by remember { mutableStateOf(incomingUrl.orEmpty()) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var externalCaptureActive by remember { mutableStateOf(false) }
     var mitmCaInstalled by remember { mutableStateOf(viewModel.isMitmCaInstalled()) }
@@ -250,7 +256,7 @@ private fun MeerkatApp(
                         onWebViewReady = { webView = it },
                         viewModel = viewModel,
                         resources = resources,
-                        currentSessionId = currentSession?.id,
+                        currentSessionId = browserSession?.id,
                         onOpenResources = { mode = MainMode.RESOURCES },
                     )
                     MainMode.EXTERNAL -> ExternalAppPane(
@@ -710,11 +716,15 @@ private fun BrowserPane(
     currentSessionId: Long?,
     onOpenResources: () -> Unit,
 ) {
-    var localAddress by remember(address) { mutableStateOf(address) }
+    var localAddress by remember { mutableStateOf(address) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var loading by remember { mutableStateOf(false) }
     var progress by remember { mutableIntStateOf(0) }
     var pageError by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(address) {
+        if (address.isNotBlank() && address != localAddress) localAddress = address
+    }
 
     val liveResources = remember(resources, currentSessionId) {
         if (currentSessionId == null) emptyList()
@@ -727,31 +737,8 @@ private fun BrowserPane(
 
     Column(
         Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = MaterialTheme.shapes.large,
-            color = MaterialTheme.colorScheme.surfaceVariant,
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(
-                    "自動嗅探",
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f),
-                )
-                AssistChip(onClick = {}, label = { Text("圖片 $imageCount") })
-                AssistChip(onClick = {}, label = { Text("影片 $videoCount") })
-                AssistChip(onClick = {}, label = { Text("文件 $documentCount") })
-                AssistChip(onClick = {}, label = { Text("其他 $otherCount") })
-                TextButton(onClick = onOpenResources) { Text("查看") }
-            }
-        }
-
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -765,20 +752,22 @@ private fun BrowserPane(
                 },
                 modifier = Modifier.weight(1f),
                 singleLine = true,
-                label = { Text("網址") },
+                placeholder = { Text("輸入網址") },
             )
-            Button(onClick = {
-                val url = normalizeUrl(localAddress)
-                localAddress = url
-                onAddressChange(url)
-                pageError = null
-                webView?.loadUrl(url)
-            }) { Text("開啟") }
+            Button(
+                enabled = localAddress.isNotBlank(),
+                onClick = {
+                    val url = normalizeUrl(localAddress)
+                    localAddress = url
+                    onAddressChange(url)
+                    pageError = null
+                    webView?.loadUrl(url)
+                },
+            ) { Text("開啟") }
         }
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = { webView?.goBack() }, enabled = webView?.canGoBack() == true) {
@@ -787,12 +776,17 @@ private fun BrowserPane(
             IconButton(onClick = { webView?.goForward() }, enabled = webView?.canGoForward() == true) {
                 Icon(Icons.Default.ArrowForward, "下一頁")
             }
-            IconButton(onClick = { webView?.reload() }) {
+            IconButton(onClick = { webView?.reload() }, enabled = webView?.url != null) {
                 Icon(Icons.Default.Refresh, "重新整理")
             }
-            OutlinedButton(onClick = { webView?.let { scanDomResources(it, viewModel) } }) {
-                Text("掃描目前頁面")
-            }
+            Text(
+                text = "圖片 $imageCount · 影片 $videoCount · 文件 $documentCount · 其他 $otherCount",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+            TextButton(onClick = onOpenResources) { Text("資源") }
         }
 
         if (loading) {
@@ -806,11 +800,11 @@ private fun BrowserPane(
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 color = MaterialTheme.colorScheme.errorContainer,
-                shape = MaterialTheme.shapes.medium,
+                shape = MaterialTheme.shapes.small,
             ) {
                 Text(
                     text = error,
-                    modifier = Modifier.padding(10.dp),
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                     color = MaterialTheme.colorScheme.onErrorContainer,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -826,6 +820,8 @@ private fun BrowserPane(
                     webView = this
                     onWebViewReady(this)
                     setBackgroundColor(android.graphics.Color.WHITE)
+                    isFocusable = true
+                    isFocusableInTouchMode = true
 
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
@@ -835,15 +831,18 @@ private fun BrowserPane(
                     settings.blockNetworkImage = false
                     settings.useWideViewPort = true
                     settings.loadWithOverviewMode = false
+                    settings.setSupportZoom(true)
                     settings.builtInZoomControls = true
                     settings.displayZoomControls = false
                     settings.javaScriptCanOpenWindowsAutomatically = true
                     settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+
                     addJavascriptInterface(
                         BrowserCaptureBridge(ctx, viewModel, settings.userAgentString),
                         "MeerkatCapture",
                     )
-                    if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                    val hasDocumentStart = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+                    if (hasDocumentStart) {
                         WebViewCompat.addDocumentStartJavaScript(
                             this,
                             browserCaptureScript(),
@@ -857,7 +856,7 @@ private fun BrowserPane(
                     webChromeClient = object : WebChromeClient() {
                         override fun onProgressChanged(view: WebView?, newProgress: Int) {
                             progress = newProgress
-                            loading = newProgress < 100
+                            loading = newProgress in 0..99
                             super.onProgressChanged(view, newProgress)
                         }
                     }
@@ -872,48 +871,25 @@ private fun BrowserPane(
                             val scheme = req.url.scheme?.lowercase()
                             val currentUrl = view?.url
 
-                            // Instagram repeatedly tries to leave mobile web for its app/store.
-                            // Keep the user in Meerkat instead of following that redirect loop.
-                            if (
-                                isInstagramHost(currentUrl) &&
-                                (
-                                    scheme == "instagram" ||
-                                        scheme == "market" ||
-                                        isInstagramStoreUrl(raw)
-                                )
-                            ) {
-                                pageError = null
-                                return true
-                            }
-
                             if (scheme == "http" || scheme == "https") {
-                                // Play Store can also arrive as an HTTPS browser fallback.
-                                if (isInstagramHost(currentUrl) && isInstagramStoreUrl(raw)) {
-                                    pageError = null
-                                    return true
-                                }
+                                if (isInstagramHost(currentUrl) && isInstagramStoreUrl(raw)) return true
                                 return false
                             }
 
-                            val fallback = resolveBrowsableUrl(raw)
-                            if (!fallback.isNullOrBlank()) {
-                                pageError = null
-
-                                // If Instagram is already displaying the corresponding web page,
-                                // swallowing the deep link is enough. Reloading it would retrigger
-                                // the same app-link script and create an endless refresh loop.
-                                if (isInstagramHost(currentUrl) && sameBrowserTarget(currentUrl, fallback)) {
-                                    return true
+                            // Background app/deep-link attempts are silently blocked. Only a
+                            // real user tap may be converted back to a safe web URL.
+                            if (req.hasGesture()) {
+                                val fallback = resolveBrowsableUrl(raw)
+                                if (
+                                    !fallback.isNullOrBlank() &&
+                                    !isInstagramStoreUrl(fallback) &&
+                                    !sameBrowserTarget(currentUrl, fallback)
+                                ) {
+                                    localAddress = fallback
+                                    onAddressChange(fallback)
+                                    view?.loadUrl(fallback)
                                 }
-
-                                localAddress = fallback
-                                onAddressChange(fallback)
-                                view?.loadUrl(fallback)
-                                return true
                             }
-
-                            // Unknown app/deep-link schemes should never be handed to WebView.
-                            pageError = "此連結是 App 深層連結，Meerkat 已阻止外部跳轉：$scheme"
                             return true
                         }
 
@@ -923,12 +899,13 @@ private fun BrowserPane(
                         ): android.webkit.WebResourceResponse? {
                             val req = request ?: return null
                             val url = req.url.toString()
-                            val headers = req.requestHeaders.orEmpty()
-                            viewModel.recordWebResource(
-                                url = url,
-                                mimeType = null,
-                                requestHeaders = headers,
-                            )
+                            if (url.startsWith("http://", true) || url.startsWith("https://", true)) {
+                                viewModel.recordWebResource(
+                                    url = url,
+                                    mimeType = null,
+                                    requestHeaders = req.requestHeaders.orEmpty(),
+                                )
+                            }
                             return null
                         }
 
@@ -939,7 +916,9 @@ private fun BrowserPane(
                         ) {
                             loading = true
                             pageError = null
-                            view?.post { if (view.isAttachedToWindow) installBrowserCapture(view) }
+                            if (!hasDocumentStart) {
+                                view?.post { if (view.isAttachedToWindow) installBrowserCapture(view) }
+                            }
                             super.onPageStarted(view, url, favicon)
                         }
 
@@ -948,7 +927,8 @@ private fun BrowserPane(
                             request: WebResourceRequest?,
                             error: WebResourceError?,
                         ) {
-                            if (request?.isForMainFrame == true) {
+                            val scheme = request?.url?.scheme?.lowercase()
+                            if (request?.isForMainFrame == true && (scheme == "http" || scheme == "https")) {
                                 pageError = "網頁載入失敗：${error?.description ?: "未知錯誤"}"
                                 loading = false
                             }
@@ -961,12 +941,12 @@ private fun BrowserPane(
                                 localAddress = it
                                 onAddressChange(it)
                             }
-                            view?.let { page ->
-                                page.post { if (page.isAttachedToWindow) installBrowserCapture(page) }
-                                page.postDelayed({
-                                    if (page.isAttachedToWindow) scanDomResources(page, viewModel)
-                                }, 900)
+                            if (!hasDocumentStart) {
+                                view?.post { if (view.isAttachedToWindow) installBrowserCapture(view) }
                             }
+                            view?.postDelayed({
+                                if (view.isAttachedToWindow) scanDomResources(view, viewModel)
+                            }, 700)
                             super.onPageFinished(view, url)
                         }
 
@@ -975,12 +955,11 @@ private fun BrowserPane(
                             detail: RenderProcessGoneDetail?,
                         ): Boolean {
                             pageError = if (detail?.didCrash() == true) {
-                                "網頁渲染程序崩潰。已停止本頁掃描，請重新載入。"
+                                "網頁渲染程序崩潰，請重新開啟頁面。"
                             } else {
-                                "網頁渲染程序被系統終止，可能是頁面過重。請重新載入。"
+                                "網頁渲染程序被系統終止，請重新開啟頁面。"
                             }
                             loading = false
-                            view?.destroy()
                             return true
                         }
                     }
@@ -999,7 +978,9 @@ private fun BrowserPane(
                         }
                     }
 
-                    loadUrl(normalizeUrl(localAddress))
+                    if (localAddress.isNotBlank()) {
+                        loadUrl(normalizeUrl(localAddress))
+                    }
                 }
             },
             update = { view ->
@@ -1383,7 +1364,8 @@ private fun ResourceRow(
 
                 if (resource.type == ResourceType.IMAGE ||
                     resource.type == ResourceType.VIDEO ||
-                    resource.type == ResourceType.AUDIO
+                    resource.type == ResourceType.AUDIO ||
+                    resource.type == ResourceType.STREAM
                 ) {
                     OutlinedButton(onClick = { showPreview = true }) {
                         Text("預覽")
@@ -1493,20 +1475,39 @@ private fun resourceTypeIcon(type: ResourceType) = when (type) {
 }
 
 private fun resourceSummaryTitle(resource: Resource): String {
-    val resolution = if (resource.width != null && resource.height != null) {
-        "${resource.width}×${resource.height}"
-    } else null
-    return listOfNotNull(
-        resolution,
-        resource.extension?.uppercase(),
-        resource.mimeType?.substringAfter('/'),
-    ).firstOrNull() ?: resourceTypeLabel(resource.type)
+    resource.fileName
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+        ?.let { return it }
+
+    val sourceUrl = resource.finalUrl ?: resource.url
+    val pathName = runCatching {
+        Uri.decode(Uri.parse(sourceUrl).lastPathSegment.orEmpty())
+    }.getOrNull()
+        ?.substringBefore('?')
+        ?.trim()
+        ?.takeIf { it.isNotBlank() && it != "/" }
+        ?.take(120)
+    if (!pathName.isNullOrBlank()) return pathName
+
+    return when (resource.uiCategory()) {
+        UiResourceCategory.IMAGE -> "圖片資源"
+        UiResourceCategory.VIDEO -> "影片資源"
+        UiResourceCategory.DOCUMENT -> resource.extension?.uppercase()?.let { "$it 文件" } ?: "文件資源"
+        UiResourceCategory.OTHER -> resource.extension?.uppercase() ?: resourceTypeLabel(resource.type)
+    }
 }
 
 private fun resourceSummaryLine(resource: Resource): String {
     val parts = buildList {
+        if (resource.width != null && resource.height != null) {
+            add("${resource.width}×${resource.height}")
+        }
         resource.contentLength?.let { add(formatBytes(it)) }
         resource.durationMs?.takeIf { it > 0 }?.let { add(formatDuration(it)) }
+        resource.extension?.takeIf { it.isNotBlank() }?.uppercase()?.let { ext ->
+            if (none { it.equals(ext, true) }) add(ext)
+        }
         resource.streamType?.let { add(it.name) }
         if (isEmpty()) add(resource.host)
     }
@@ -1579,42 +1580,53 @@ private fun ResourcePreviewDialog(
                         )
                     }
 
-                    ResourceType.VIDEO, ResourceType.AUDIO -> {
+                    ResourceType.VIDEO, ResourceType.AUDIO, ResourceType.STREAM -> {
+                        val context = LocalContext.current
+                        val headers = remember(resource.id) {
+                            buildMap {
+                                resource.userAgent?.takeIf { it.isNotBlank() }?.let { put("User-Agent", it) }
+                                resource.referer?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
+                                resource.cookie?.takeIf { it.isNotBlank() }?.let { put("Cookie", it) }
+                            }
+                        }
+                        val player = remember(resource.id) {
+                            val dataSourceFactory = DefaultHttpDataSource.Factory()
+                                .setAllowCrossProtocolRedirects(true)
+                                .setDefaultRequestProperties(headers)
+                            ExoPlayer.Builder(context)
+                                .setMediaSourceFactory(
+                                    DefaultMediaSourceFactory(context)
+                                        .setDataSourceFactory(dataSourceFactory)
+                                )
+                                .build()
+                                .apply {
+                                    addListener(object : Player.Listener {
+                                        override fun onPlayerError(error: PlaybackException) {
+                                            previewError = "媒體預覽失敗：${error.errorCodeName}"
+                                        }
+                                    })
+                                    setMediaItem(MediaItem.fromUri(url))
+                                    prepare()
+                                    playWhenReady = false
+                                }
+                        }
+                        DisposableEffect(player) {
+                            onDispose { player.release() }
+                        }
                         AndroidView(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(360.dp),
-                            factory = { context ->
-                                VideoView(context).apply {
-                                    setBackgroundColor(android.graphics.Color.DKGRAY)
-                                    val controller = MediaController(context)
-                                    controller.setAnchorView(this)
-                                    setMediaController(controller)
-
-                                    val headers = buildMap {
-                                        resource.userAgent?.takeIf { it.isNotBlank() }?.let {
-                                            put("User-Agent", it)
-                                        }
-                                        resource.referer?.takeIf { it.isNotBlank() }?.let {
-                                            put("Referer", it)
-                                        }
-                                        resource.cookie?.takeIf { it.isNotBlank() }?.let {
-                                            put("Cookie", it)
-                                        }
-                                    }
-
-                                    setOnPreparedListener {
-                                        previewError = null
-                                        start()
-                                    }
-                                    setOnErrorListener { _, what, extra ->
-                                        previewError = "媒體預覽失敗：what=$what extra=$extra"
-                                        true
-                                    }
-                                    setVideoURI(Uri.parse(url), headers)
-                                    requestFocus()
+                                .height(300.dp),
+                            factory = { ctx ->
+                                PlayerView(ctx).apply {
+                                    useController = true
+                                    controllerAutoShow = true
+                                    controllerHideOnTouch = true
+                                    this.player = player
+                                    setBackgroundColor(android.graphics.Color.BLACK)
                                 }
                             },
+                            update = { it.player = player },
                         )
                     }
 
