@@ -62,9 +62,22 @@ class HttpResourceStreamInspector(
     private var responseChunkRemaining = 0L
     private var responseContext: ResponseContext? = null
 
+    private var webSocketMode = false
+    private var webSocketRequest: PendingRequest? = null
+    private val webSocketClientParser = WebSocketFrameParser { text ->
+        webSocketRequest?.let { deepSearch(it, text) }
+    }
+    private val webSocketServerParser = WebSocketFrameParser { text ->
+        webSocketRequest?.let { deepSearch(it, text) }
+    }
+
     @Synchronized
     fun onClientBytes(bytes: ByteArray, length: Int) {
         if (length <= 0) return
+        if (webSocketMode) {
+            webSocketClientParser.feed(bytes, length)
+            return
+        }
         requestQueue.append(bytes, length)
         consumeRequests()
     }
@@ -72,6 +85,10 @@ class HttpResourceStreamInspector(
     @Synchronized
     fun onServerBytes(bytes: ByteArray, length: Int) {
         if (length <= 0) return
+        if (webSocketMode) {
+            webSocketServerParser.feed(bytes, length)
+            return
+        }
         responseQueue.append(bytes, length)
         consumeResponses()
     }
@@ -206,6 +223,17 @@ class HttpResourceStreamInspector(
                     if (request == null) {
                         responseMode = BodyMode.UNTIL_CLOSE
                         responseQueue.clear()
+                        return
+                    }
+
+                    val upgrade = headerValue(lines, "Upgrade")
+                    if (statusCode == 101 && upgrade.equals("websocket", true)) {
+                        webSocketRequest = request
+                        webSocketMode = true
+                        val leftover = responseQueue.take(responseQueue.size)
+                        if (leftover.isNotEmpty()) {
+                            webSocketServerParser.feed(leftover, leftover.size)
+                        }
                         return
                     }
 
@@ -664,6 +692,99 @@ class HttpResourceStreamInspector(
             ?.trim()
     }
 
+    private class WebSocketFrameParser(
+        private val onText: (String) -> Unit,
+    ) {
+        private var buffer = ByteArray(0)
+        private var fragmentedText = ByteArrayOutputStream()
+        private var fragmented = false
+
+        fun feed(bytes: ByteArray, length: Int) {
+            if (length <= 0) return
+            val incoming = bytes.copyOfRange(0, length)
+            buffer = if (buffer.isEmpty()) incoming else buffer + incoming
+            consume()
+        }
+
+        private fun consume() {
+            while (true) {
+                if (buffer.size < 2) return
+                val b0 = buffer[0].toInt() and 0xff
+                val b1 = buffer[1].toInt() and 0xff
+                val fin = (b0 and 0x80) != 0
+                val opcode = b0 and 0x0f
+                val masked = (b1 and 0x80) != 0
+                var offset = 2
+                var payloadLength = (b1 and 0x7f).toLong()
+
+                if (payloadLength == 126L) {
+                    if (buffer.size < offset + 2) return
+                    payloadLength = ((buffer[offset].toInt() and 0xff) shl 8 or
+                        (buffer[offset + 1].toInt() and 0xff)).toLong()
+                    offset += 2
+                } else if (payloadLength == 127L) {
+                    if (buffer.size < offset + 8) return
+                    payloadLength = 0L
+                    repeat(8) { index ->
+                        payloadLength = (payloadLength shl 8) or (buffer[offset + index].toLong() and 0xffL)
+                    }
+                    offset += 8
+                }
+
+                if (payloadLength < 0L || payloadLength > MAX_WEBSOCKET_PAYLOAD) {
+                    buffer = ByteArray(0)
+                    fragmented = false
+                    fragmentedText.reset()
+                    return
+                }
+
+                val maskKey = if (masked) {
+                    if (buffer.size < offset + 4) return
+                    buffer.copyOfRange(offset, offset + 4).also { offset += 4 }
+                } else null
+
+                val total = offset.toLong() + payloadLength
+                if (total > Int.MAX_VALUE || buffer.size < total.toInt()) return
+                val payload = buffer.copyOfRange(offset, total.toInt())
+                buffer = if (total.toInt() >= buffer.size) ByteArray(0) else buffer.copyOfRange(total.toInt(), buffer.size)
+
+                if (maskKey != null) {
+                    for (i in payload.indices) {
+                        payload[i] = (payload[i].toInt() xor maskKey[i % 4].toInt()).toByte()
+                    }
+                }
+
+                when (opcode) {
+                    0x1 -> {
+                        if (fin) {
+                            onText(payload.toString(Charsets.UTF_8))
+                        } else {
+                            fragmented = true
+                            fragmentedText.reset()
+                            fragmentedText.write(payload)
+                        }
+                    }
+                    0x0 -> if (fragmented) {
+                        if (fragmentedText.size() + payload.size <= MAX_WEBSOCKET_PAYLOAD.toInt()) {
+                            fragmentedText.write(payload)
+                            if (fin) {
+                                onText(fragmentedText.toByteArray().toString(Charsets.UTF_8))
+                                fragmented = false
+                                fragmentedText.reset()
+                            }
+                        } else {
+                            fragmented = false
+                            fragmentedText.reset()
+                        }
+                    }
+                    0x8 -> {
+                        fragmented = false
+                        fragmentedText.reset()
+                    }
+                }
+            }
+        }
+    }
     private class ByteQueue {
         private var data = ByteArray(0)
 
@@ -723,6 +844,7 @@ class HttpResourceStreamInspector(
         private const val MAX_INSPECT_BODY_BYTES = 4 * 1024 * 1024
         private const val MAX_INSPECT_BODY_CHARS = 4 * 1024 * 1024
         private const val MAX_DEEP_SEARCH_RESULTS = 256
+        private const val MAX_WEBSOCKET_PAYLOAD = 2L * 1024 * 1024
         private val HEADER_END = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
         private val CRLF = "\r\n".toByteArray(Charsets.US_ASCII)
         private val METHODS = setOf("GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "PATCH")
