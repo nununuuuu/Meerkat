@@ -3,6 +3,7 @@ package com.resourcesniffer.app.ui
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import com.resourcesniffer.app.capture.MitmCertificateAuthority
@@ -100,8 +101,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         )
     }
-    fun mitmCaInstallIntent(): Intent =
-        MitmCertificateAuthority(getApplication<Application>()).installIntent()
+    fun exportMitmCaCertificate(): Uri =
+        MitmCertificateAuthority(getApplication<Application>()).exportToDownloads()
+
+    fun caSettingsIntent(): Intent =
+        Intent(Settings.ACTION_SECURITY_SETTINGS)
 
     fun isMitmCaInstalled(): Boolean =
         MitmCertificateAuthority(getApplication<Application>()).isInstalledInAndroidCaStore()
