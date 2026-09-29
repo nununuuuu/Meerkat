@@ -140,12 +140,16 @@ class DashDownloadService : Service() {
         val segmentDuration: Long?,
         val manifestDurationSeconds: Double?,
         val timeline: List<TimelineEntry>,
+        val singleFileUrl: String?,
     ) {
-        fun initializationUrl(): String? =
-            explicitInitialization?.let { resolve(baseUrl, it) }
+        fun initializationUrl(): String? {
+            if (singleFileUrl != null) return null
+            return explicitInitialization?.let { resolve(baseUrl, it) }
                 ?: initialization?.let { resolve(baseUrl, replaceTemplate(it, id, startNumber, 0L)) }
+        }
 
         fun segmentUrls(): List<String> {
+            singleFileUrl?.let { return listOf(it) }
             if (explicitSegments.isNotEmpty()) {
                 return explicitSegments.map { resolve(baseUrl, it) }
             }
@@ -154,9 +158,27 @@ class DashDownloadService : Service() {
                 val out = mutableListOf<String>()
                 var number = startNumber
                 var currentTime = timeline.first().t ?: 0L
-                timeline.forEach { entry ->
+                timeline.forEachIndexed { index, entry ->
                     entry.t?.let { currentTime = it }
-                    val count = if (entry.r < 0) 1 else entry.r + 1
+                    val count = if (entry.r >= 0) {
+                        entry.r + 1
+                    } else {
+                        val nextTime = timeline.getOrNull(index + 1)?.t
+                        when {
+                            nextTime != null && nextTime > currentTime -> {
+                                ceil((nextTime - currentTime).toDouble() / entry.d.toDouble())
+                                    .toInt()
+                                    .coerceAtLeast(1)
+                            }
+                            manifestDurationSeconds != null -> {
+                                val endTicks = (manifestDurationSeconds * timescale).toLong()
+                                ceil((endTicks - currentTime).coerceAtLeast(entry.d).toDouble() / entry.d.toDouble())
+                                    .toInt()
+                                    .coerceAtLeast(1)
+                            }
+                            else -> 1
+                        }
+                    }
                     repeat(count) {
                         out += resolve(baseUrl, replaceTemplate(mediaTemplate, id, number, currentTime))
                         number++
@@ -201,6 +223,7 @@ class DashDownloadService : Service() {
         var baseUrl: String?,
         var template: Template?,
         var segmentList: SegmentListData?,
+        var segmentBase: Boolean,
     )
 
     private data class Manifest(
@@ -301,6 +324,7 @@ class DashDownloadService : Service() {
         var adaptationBase: String? = null
         var adaptationTemplate: Template? = null
         var adaptationSegmentList: SegmentListData? = null
+        var adaptationSegmentBase = false
         var currentRep: RepBuilder? = null
         var inTimeline = false
         var baseTarget: String? = null
@@ -320,6 +344,7 @@ class DashDownloadService : Service() {
                         adaptationBase = null
                         adaptationTemplate = null
                         adaptationSegmentList = null
+                        adaptationSegmentBase = false
                     }
                     "Role" -> {
                         val role = parser.getAttributeValue(null, "value").orEmpty().lowercase()
@@ -342,6 +367,7 @@ class DashDownloadService : Service() {
                             baseUrl = null,
                             template = null,
                             segmentList = null,
+                            segmentBase = false,
                         )
                     }
                     "BaseURL" -> baseTarget = if (currentRep != null) "rep" else "adapt"
@@ -359,6 +385,13 @@ class DashDownloadService : Service() {
                     "SegmentList" -> {
                         val list = SegmentListData()
                         if (currentRep != null) currentRep?.segmentList = list else adaptationSegmentList = list
+                    }
+                    "SegmentBase" -> {
+                        if (currentRep != null) {
+                            currentRep?.segmentBase = true
+                        } else {
+                            adaptationSegmentBase = true
+                        }
                     }
                     "Initialization" -> {
                         val source = parser.getAttributeValue(null, "sourceURL")
@@ -404,32 +437,39 @@ class DashDownloadService : Service() {
                         val b = currentRep
                         val template = b?.template ?: adaptationTemplate
                         val segmentList = b?.segmentList ?: adaptationSegmentList
-                        if (
-                            b != null &&
-                            (
-                                (template?.initialization != null && template.media != null) ||
-                                    (segmentList != null && segmentList.segments.isNotEmpty())
-                            )
-                        ) {
+                        if (b != null) {
                             val durationSeconds = periodDuration ?: mpdDuration
-                            reps += Representation(
-                                kind = if (b.kind == TrackKind.OTHER) kindFor(null, b.mimeType) else b.kind,
-                                id = b.id,
-                                bandwidth = b.bandwidth,
-                                width = b.width,
-                                height = b.height,
-                                mimeType = b.mimeType,
-                                baseUrl = resolve(mpdUrl, b.baseUrl ?: adaptationBase ?: "."),
-                                initialization = template?.initialization,
-                                media = template?.media,
-                                explicitInitialization = segmentList?.initialization,
-                                explicitSegments = segmentList?.segments?.toList().orEmpty(),
-                                startNumber = template?.startNumber ?: 1L,
-                                timescale = template?.timescale ?: 1L,
-                                segmentDuration = template?.duration,
-                                manifestDurationSeconds = durationSeconds,
-                                timeline = template?.timeline?.toList().orEmpty(),
-                            )
+                            val resolvedBase = resolve(mpdUrl, b.baseUrl ?: adaptationBase ?: ".")
+                            val hasTemplate =
+                                template?.initialization != null && template.media != null
+                            val hasList =
+                                segmentList != null && segmentList.segments.isNotEmpty()
+                            val hasSegmentBase =
+                                b.segmentBase || adaptationSegmentBase
+                            val looksLikeSingleFile =
+                                hasSegmentBase || looksLikeDirectMediaUrl(resolvedBase, b.mimeType)
+
+                            if (hasTemplate || hasList || looksLikeSingleFile) {
+                                reps += Representation(
+                                    kind = if (b.kind == TrackKind.OTHER) kindFor(null, b.mimeType) else b.kind,
+                                    id = b.id,
+                                    bandwidth = b.bandwidth,
+                                    width = b.width,
+                                    height = b.height,
+                                    mimeType = b.mimeType,
+                                    baseUrl = resolvedBase,
+                                    initialization = template?.initialization,
+                                    media = template?.media,
+                                    explicitInitialization = segmentList?.initialization,
+                                    explicitSegments = segmentList?.segments?.toList().orEmpty(),
+                                    startNumber = template?.startNumber ?: 1L,
+                                    timescale = template?.timescale ?: 1L,
+                                    segmentDuration = template?.duration,
+                                    manifestDurationSeconds = durationSeconds,
+                                    timeline = template?.timeline?.toList().orEmpty(),
+                                    singleFileUrl = resolvedBase.takeIf { looksLikeSingleFile && !hasTemplate && !hasList },
+                                )
+                            }
                         }
                         currentRep = null
                     }
@@ -652,6 +692,26 @@ class DashDownloadService : Service() {
                 NotificationChannel(CHANNEL_ID, "DASH 下載", NotificationManager.IMPORTANCE_LOW)
             )
         }
+    }
+
+    private fun looksLikeDirectMediaUrl(url: String, mimeType: String?): Boolean {
+        val clean = url.substringBefore('?').lowercase()
+        if (
+            clean.endsWith(".mp4") ||
+            clean.endsWith(".m4a") ||
+            clean.endsWith(".m4v") ||
+            clean.endsWith(".webm") ||
+            clean.endsWith(".mp3") ||
+            clean.endsWith(".vtt") ||
+            clean.endsWith(".ttml")
+        ) return true
+
+        val mime = mimeType.orEmpty().lowercase()
+        return mime.startsWith("video/") ||
+            mime.startsWith("audio/") ||
+            mime == "application/mp4" ||
+            mime == "text/vtt" ||
+            mime.contains("ttml")
     }
 
     private fun kindFor(contentType: String?, mime: String?): TrackKind {
