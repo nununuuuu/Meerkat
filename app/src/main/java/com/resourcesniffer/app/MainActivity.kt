@@ -1043,9 +1043,12 @@ private fun ResourcePane(
     onClear: () -> Unit,
     onEnableOverlay: () -> Unit,
 ) {
+    val context = LocalContext.current
     var selectedType by remember { mutableStateOf<ResourceType?>(null) }
     var query by remember { mutableStateOf("") }
     var currentOnly by remember { mutableStateOf(true) }
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
 
     val visible = remember(resources, selectedType, query, currentOnly, currentSessionId) {
         resources.filter { resource ->
@@ -1070,6 +1073,10 @@ private fun ResourcePane(
         )
     }
 
+    LaunchedEffect(visible.map { it.id }) {
+        selectedIds = selectedIds.intersect(visible.mapTo(linkedSetOf()) { it.id })
+    }
+
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
             modifier = Modifier
@@ -1088,6 +1095,20 @@ private fun ResourcePane(
                 Text("清空歷史")
             }
             OutlinedButton(onClick = onEnableOverlay) { Text("啟用懸浮球") }
+            OutlinedButton(onClick = {
+                selectionMode = !selectionMode
+                if (!selectionMode) selectedIds = emptySet()
+            }) {
+                Text(if (selectionMode) "取消選取" else "批次選取")
+            }
+            if (selectionMode) {
+                OutlinedButton(onClick = {
+                    selectedIds = if (selectedIds.size == visible.size) emptySet()
+                    else visible.mapTo(linkedSetOf()) { it.id }
+                }) {
+                    Text(if (selectedIds.size == visible.size && visible.isNotEmpty()) "取消全選" else "全選目前")
+                }
+            }
         }
 
         OutlinedTextField(
@@ -1111,6 +1132,7 @@ private fun ResourcePane(
                 ResourceType.AUDIO to "音訊",
                 ResourceType.STREAM to "串流",
                 ResourceType.DOCUMENT to "文件",
+                ResourceType.ARCHIVE to "壓縮檔",
             ).forEach { (type, label) ->
                 FilterChip(
                     selected = selectedType == type,
@@ -1122,6 +1144,51 @@ private fun ResourcePane(
 
         Text("已保存 ${visible.size} 項可下載資源", fontWeight = FontWeight.SemiBold)
 
+        if (selectionMode) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "已選 ${selectedIds.size} 項",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Button(
+                    enabled = selectedIds.isNotEmpty(),
+                    onClick = {
+                        val targets = visible.filter { it.id in selectedIds }
+                        var queued = 0
+                        var failed = 0
+                        targets.forEach { resource ->
+                            runCatching {
+                                DownloadHelper.enqueue(
+                                    context,
+                                    resource,
+                                    if (resource.type == ResourceType.STREAM) DownloadQuality.HIGH
+                                    else DownloadQuality.HIGH,
+                                )
+                            }.onSuccess { queued++ }
+                                .onFailure { failed++ }
+                        }
+                        Toast.makeText(
+                            context,
+                            if (failed == 0) "已加入 $queued 項下載"
+                            else "已加入 $queued 項，$failed 項失敗",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        selectedIds = emptySet()
+                        selectionMode = false
+                    },
+                ) {
+                    Icon(Icons.Default.Download, null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("下載選取")
+                }
+            }
+        }
+
         if (visible.isEmpty()) {
             Text("尚未偵測到符合條件的資源。", style = MaterialTheme.typography.bodySmall)
         } else {
@@ -1129,14 +1196,32 @@ private fun ResourcePane(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(visible, key = { it.id }) { ResourceRow(it) }
+                items(visible, key = { it.id }) { resource ->
+                    ResourceRow(
+                        resource = resource,
+                        selectionMode = selectionMode,
+                        selected = resource.id in selectedIds,
+                        onToggleSelected = {
+                            selectedIds = if (resource.id in selectedIds) {
+                                selectedIds - resource.id
+                            } else {
+                                selectedIds + resource.id
+                            }
+                        },
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun ResourceRow(resource: Resource) {
+private fun ResourceRow(
+    resource: Resource,
+    selectionMode: Boolean = false,
+    selected: Boolean = false,
+    onToggleSelected: () -> Unit = {},
+) {
     val context = LocalContext.current
     val url = resource.url ?: return
     var showPreview by remember { mutableStateOf(false) }
@@ -1156,6 +1241,12 @@ private fun ResourceRow(resource: Resource) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                if (selectionMode) {
+                    Checkbox(
+                        checked = selected,
+                        onCheckedChange = { onToggleSelected() },
+                    )
+                }
                 Surface(
                     shape = MaterialTheme.shapes.medium,
                     color = MaterialTheme.colorScheme.primaryContainer,
@@ -1204,6 +1295,7 @@ private fun ResourceRow(resource: Resource) {
                 maxLines = 2,
             )
 
+            if (!selectionMode) {
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1241,6 +1333,11 @@ private fun ResourceRow(resource: Resource) {
                     Toast.makeText(context, "已複製網址", Toast.LENGTH_SHORT).show()
                 }) {
                     Text("複製")
+                }
+            }
+            } else {
+                TextButton(onClick = onToggleSelected) {
+                    Text(if (selected) "取消選取" else "選取")
                 }
             }
         }
