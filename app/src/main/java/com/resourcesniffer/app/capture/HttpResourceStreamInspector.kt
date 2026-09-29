@@ -523,9 +523,9 @@ class HttpResourceStreamInspector(
             .forEach { match ->
                 val tag = match.value.lowercase()
                 when {
-                    tag.contains("contenttype="audio"") || tag.contains("mimetype="audio/") ||
+                    tag.contains("contenttype=\"audio\"") || tag.contains("mimetype=\"audio/") ||
                         tag.contains("contenttype='audio'") || tag.contains("mimetype='audio/") -> audioTracks++
-                    tag.contains("contenttype="text"") || tag.contains("mimetype="text/") ||
+                    tag.contains("contenttype=\"text\"") || tag.contains("mimetype=\"text/") ||
                         tag.contains("application/ttml") || tag.contains("application/mp4") && tag.contains("subtitle") -> subtitleTracks++
                 }
             }
