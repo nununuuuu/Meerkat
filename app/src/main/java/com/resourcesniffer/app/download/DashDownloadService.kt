@@ -125,6 +125,8 @@ class DashDownloadService : Service() {
     private enum class TrackKind { VIDEO, AUDIO, TEXT, OTHER }
 
     private data class TimelineEntry(val t: Long?, val d: Long, val r: Int)
+    private data class ByteRange(val start: Long, val length: Long)
+    private data class SegmentRequest(val url: String, val range: ByteRange?)
 
     private data class Representation(
         val periodIndex: Int,
@@ -145,6 +147,8 @@ class DashDownloadService : Service() {
         val manifestDurationSeconds: Double?,
         val timeline: List<TimelineEntry>,
         val singleFileUrl: String?,
+        val segmentBaseInitRange: ByteRange?,
+        val segmentBaseIndexRange: ByteRange?,
     ) {
         fun initializationUrl(): String? {
             if (singleFileUrl != null) return null
@@ -229,6 +233,8 @@ class DashDownloadService : Service() {
         var template: Template?,
         var segmentList: SegmentListData?,
         var segmentBase: Boolean,
+        var segmentBaseInitRange: ByteRange?,
+        var segmentBaseIndexRange: ByteRange?,
     )
 
     private data class Manifest(
@@ -263,11 +269,11 @@ class DashDownloadService : Service() {
         require(selectedByPeriod.isNotEmpty()) { "找不到可下載的 DASH 軌道" }
 
         val flattened = selectedByPeriod.values.flatten()
-        val segmentLists = flattened.associateWith { it.segmentUrls() }
+        val segmentLists = flattened.associateWith { segmentRequests(it, headers) }
         require(segmentLists.values.any { it.isNotEmpty() }) { "此 MPD 的分段格式目前不支援" }
 
         val total = flattened.sumOf {
-            (if (it.initializationUrl() != null) 1 else 0) +
+            (if (initializationRequest(it) != null) 1 else 0) +
                 (segmentLists[it]?.size ?: 0)
         }
         var done = 0
@@ -289,15 +295,15 @@ class DashDownloadService : Service() {
                         "dash-" + stamp + "-p" + periodIndex + "-" + suffix + "-" + repIndex + ".bin",
                     )
                     FileOutputStream(temp).use { output ->
-                        rep.initializationUrl()?.let { initUrl ->
-                            output.write(fetchBytes(initUrl, headers))
+                        initializationRequest(rep)?.let { init ->
+                            output.write(fetchBytes(init.url, headers, init.range))
                             done++
                             updateProgress(recordId, done, total)
                         }
 
                         segmentLists[rep].orEmpty().forEach { segment ->
                             ensureNotCancelled(recordId)
-                            output.write(fetchBytes(segment, headers))
+                            output.write(fetchBytes(segment.url, headers, segment.range))
                             done++
                             updateProgress(recordId, done, total)
                         }
@@ -419,15 +425,17 @@ class DashDownloadService : Service() {
                         ensureNotCancelled(recordId)
                         val state = stateFor(rep)
                         FileOutputStream(state.file, state.file.exists() && state.file.length() > 0L).use { output ->
-                            rep.initializationUrl()?.let { init ->
-                                if (state.initUrl != init && state.seen.add("init|" + init)) {
-                                    output.write(fetchBytes(init, headers))
-                                    state.initUrl = init
+                            initializationRequest(rep)?.let { init ->
+                                val initKey = "init|" + requestIdentity(init)
+                                if (state.initUrl != initKey && state.seen.add(initKey)) {
+                                    output.write(fetchBytes(init.url, headers, init.range))
+                                    state.initUrl = initKey
                                 }
                             }
-                            rep.segmentUrls().forEach { url ->
-                                if (!state.seen.add(url)) return@forEach
-                                output.write(fetchBytes(url, headers))
+                            segmentRequests(rep, headers).forEach { request ->
+                                val key = requestIdentity(request)
+                                if (!state.seen.add(key)) return@forEach
+                                output.write(fetchBytes(request.url, headers, request.range))
                                 state.segmentCount++
                             }
                             output.fd.sync()
@@ -532,6 +540,132 @@ class DashDownloadService : Service() {
         )
     }
 
+    private fun initializationRequest(rep: Representation): SegmentRequest? {
+        val single = rep.singleFileUrl
+        if (single != null) {
+            return rep.segmentBaseInitRange?.let { SegmentRequest(single, it) }
+        }
+        return rep.initializationUrl()?.let { SegmentRequest(it, null) }
+    }
+
+    private fun segmentRequests(
+        rep: Representation,
+        headers: Map<String, String>,
+    ): List<SegmentRequest> {
+        val single = rep.singleFileUrl
+        if (single == null) {
+            return rep.segmentUrls().map { SegmentRequest(it, null) }
+        }
+
+        val index = rep.segmentBaseIndexRange
+        val init = rep.segmentBaseInitRange
+        if (index == null || init == null) {
+            return listOf(SegmentRequest(single, null))
+        }
+
+        return runCatching {
+            val indexBytes = fetchBytes(single, headers, index)
+            val ranges = parseSidxRanges(indexBytes, index.start)
+            require(ranges.isNotEmpty()) { "SIDX 沒有 media reference" }
+            ranges.map { SegmentRequest(single, it) }
+        }.getOrElse {
+            listOf(SegmentRequest(single, null))
+        }
+    }
+
+    private fun requestIdentity(request: SegmentRequest): String =
+        request.url + "|" + (request.range?.let { it.start.toString() + ":" + it.length } ?: "full")
+
+    private fun parseDashRange(value: String?): ByteRange? {
+        if (value.isNullOrBlank()) return null
+        val parts = value.trim().split('-', limit = 2)
+        if (parts.size != 2) return null
+        val start = parts[0].trim().toLongOrNull() ?: return null
+        val end = parts[1].trim().toLongOrNull() ?: return null
+        if (start < 0L || end < start) return null
+        return ByteRange(start, end - start + 1L)
+    }
+
+    private fun parseSidxRanges(bytes: ByteArray, absoluteRangeStart: Long): List<ByteRange> {
+        if (bytes.size < 32) return emptyList()
+        var boxStart = -1
+        var i = 4
+        while (i + 4 <= bytes.size) {
+            if (
+                bytes[i] == 's'.code.toByte() &&
+                bytes[i + 1] == 'i'.code.toByte() &&
+                bytes[i + 2] == 'd'.code.toByte() &&
+                bytes[i + 3] == 'x'.code.toByte()
+            ) {
+                boxStart = i - 4
+                break
+            }
+            i++
+        }
+        if (boxStart < 0 || boxStart + 12 > bytes.size) return emptyList()
+
+        fun u32(offset: Int): Long {
+            if (offset < 0 || offset + 4 > bytes.size) error("SIDX truncated")
+            return ((bytes[offset].toLong() and 0xffL) shl 24) or
+                ((bytes[offset + 1].toLong() and 0xffL) shl 16) or
+                ((bytes[offset + 2].toLong() and 0xffL) shl 8) or
+                (bytes[offset + 3].toLong() and 0xffL)
+        }
+        fun u64(offset: Int): Long {
+            val hi = u32(offset)
+            val lo = u32(offset + 4)
+            return (hi shl 32) or lo
+        }
+
+        val size32 = u32(boxStart)
+        var header = 8
+        val boxSize = if (size32 == 1L) {
+            header = 16
+            u64(boxStart + 8)
+        } else size32
+        if (boxSize <= 0L || boxStart + boxSize > bytes.size.toLong()) return emptyList()
+
+        var p = boxStart + header
+        val version = bytes[p].toInt() and 0xff
+        p += 4 // version + flags
+        p += 4 // reference_ID
+        p += 4 // timescale
+        val firstOffset: Long
+        if (version == 0) {
+            p += 4 // earliest_presentation_time
+            firstOffset = u32(p)
+            p += 4
+        } else {
+            p += 8
+            firstOffset = u64(p)
+            p += 8
+        }
+        p += 2 // reserved
+        if (p + 2 > bytes.size) return emptyList()
+        val referenceCount =
+            ((bytes[p].toInt() and 0xff) shl 8) or (bytes[p + 1].toInt() and 0xff)
+        p += 2
+
+        val sidxEndAbsolute = absoluteRangeStart + boxStart + boxSize
+        var mediaOffset = sidxEndAbsolute + firstOffset
+        val out = mutableListOf<ByteRange>()
+
+        repeat(referenceCount) {
+            if (p + 12 > bytes.size) return@repeat
+            val ref = u32(p)
+            p += 4
+            val referenceType = (ref ushr 31) and 0x1L
+            val referencedSize = ref and 0x7fffffffL
+            p += 4 // subsegment_duration
+            p += 4 // SAP
+            if (referenceType == 0L && referencedSize > 0L) {
+                out += ByteRange(mediaOffset, referencedSize)
+            }
+            mediaOffset += referencedSize
+        }
+        return out
+    }
+
     private fun parseMpd(xml: String, mpdUrl: String): Manifest {
         val parser = Xml.newPullParser()
         parser.setInput(xml.reader())
@@ -607,6 +741,8 @@ class DashDownloadService : Service() {
                             template = null,
                             segmentList = null,
                             segmentBase = false,
+                            segmentBaseInitRange = null,
+                            segmentBaseIndexRange = null,
                         )
                     }
                     "BaseURL" -> {
@@ -633,16 +769,21 @@ class DashDownloadService : Service() {
                         if (currentRep != null) currentRep?.segmentList = list else adaptationSegmentList = list
                     }
                     "SegmentBase" -> {
+                        val indexRange = parseDashRange(parser.getAttributeValue(null, "indexRange"))
                         if (currentRep != null) {
                             currentRep?.segmentBase = true
+                            currentRep?.segmentBaseIndexRange = indexRange
                         } else {
                             adaptationSegmentBase = true
                         }
                     }
                     "Initialization" -> {
                         val source = parser.getAttributeValue(null, "sourceURL")
+                        val range = parseDashRange(parser.getAttributeValue(null, "range"))
                         if (!source.isNullOrBlank()) {
                             (currentRep?.segmentList ?: adaptationSegmentList)?.initialization = source
+                        } else if (range != null && currentRep != null) {
+                            currentRep?.segmentBaseInitRange = range
                         }
                     }
                     "SegmentURL" -> {
@@ -719,6 +860,8 @@ class DashDownloadService : Service() {
                                     manifestDurationSeconds = durationSeconds,
                                     timeline = template?.timeline?.toList().orEmpty(),
                                     singleFileUrl = resolvedBase.takeIf { looksLikeSingleFile && !hasTemplate && !hasList },
+                                    segmentBaseInitRange = b.segmentBaseInitRange,
+                                    segmentBaseIndexRange = b.segmentBaseIndexRange,
                                 )
                             }
                         }
@@ -993,7 +1136,11 @@ class DashDownloadService : Service() {
     private fun fetchText(url: String, headers: Map<String, String>): String =
         fetchBytes(url, headers).toString(Charsets.UTF_8)
 
-    private fun fetchBytes(url: String, headers: Map<String, String>): ByteArray {
+    private fun fetchBytes(
+        url: String,
+        headers: Map<String, String>,
+        range: ByteRange? = null,
+    ): ByteArray {
         var lastError: Throwable? = null
         repeat(3) { attempt ->
             val connection = URL(url).openConnection() as HttpURLConnection
@@ -1002,9 +1149,24 @@ class DashDownloadService : Service() {
                 connection.readTimeout = 30_000
                 connection.instanceFollowRedirects = true
                 headers.forEach { (key, value) -> connection.setRequestProperty(key, value) }
+                range?.let {
+                    connection.setRequestProperty(
+                        "Range",
+                        "bytes=" + it.start + "-" + (it.start + it.length - 1L),
+                    )
+                }
                 val code = connection.responseCode
                 if (code in 200..299) {
-                    connection.inputStream.use { return it.readBytes() }
+                    val data = connection.inputStream.use { it.readBytes() }
+                    if (range == null || code == HttpURLConnection.HTTP_PARTIAL) return data
+                    val start = range.start.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                    val endExclusive = (range.start + range.length)
+                        .coerceAtMost(data.size.toLong())
+                        .toInt()
+                    if (start >= 0 && start < endExclusive && endExclusive <= data.size) {
+                        return data.copyOfRange(start, endExclusive)
+                    }
+                    return data
                 }
                 val retryable = code == 408 || code == 429 || code in 500..599
                 if (!retryable) error("HTTP $code：$url")
