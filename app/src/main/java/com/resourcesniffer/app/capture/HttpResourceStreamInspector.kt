@@ -4,17 +4,21 @@ import android.net.Uri
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceClassifier
 import com.resourcesniffer.app.core.ResourceType
+import com.resourcesniffer.app.core.StreamType
 import com.resourcesniffer.app.repository.SnifferRepository
 import com.resourcesniffer.app.repository.SessionStore
+import java.io.ByteArrayOutputStream
+import java.net.URI
 import java.net.URLDecoder
 import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Lightweight HTTP/1.x resource inspector.
+ * HTTP/1.x stream inspector with framing awareness.
  *
- * Generic connections are never emitted. Only requests/responses that can be
- * classified as downloadable resources reach the repository.
+ * It never buffers ordinary response bodies. Content-Length and chunked bodies
+ * are skipped incrementally so keep-alive requests remain aligned. Small HLS
+ * and DASH manifests are captured for metadata extraction.
  */
 class HttpResourceStreamInspector(
     private val sourcePackage: String?,
@@ -22,108 +26,408 @@ class HttpResourceStreamInspector(
     private val secure: Boolean = false,
 ) {
     private data class PendingRequest(
+        val method: String,
         val url: String,
         val referer: String?,
         val userAgent: String?,
         val cookie: String?,
     )
 
+    private data class ResponseContext(
+        val request: PendingRequest,
+        val resource: Resource?,
+        val streamType: StreamType?,
+        val body: ByteArrayOutputStream? = null,
+    )
+
+    private enum class BodyMode { HEADER, FIXED, CHUNK_SIZE, CHUNK_DATA, CHUNK_CRLF, CHUNK_TRAILERS, UNTIL_CLOSE }
+
     private val ids = AtomicLong(System.currentTimeMillis())
-    private val requestBuffer = StringBuilder()
-    private val responseBuffer = StringBuilder()
+    private val requestQueue = ByteQueue()
+    private val responseQueue = ByteQueue()
     private val pendingRequests = ArrayDeque<PendingRequest>()
+
+    private var requestMode = BodyMode.HEADER
+    private var requestRemaining = 0L
+    private var requestChunkRemaining = 0L
+
+    private var responseMode = BodyMode.HEADER
+    private var responseRemaining = 0L
+    private var responseChunkRemaining = 0L
+    private var responseContext: ResponseContext? = null
 
     @Synchronized
     fun onClientBytes(bytes: ByteArray, length: Int) {
-        if (length <= 0 || !looksTextual(bytes, length)) return
-        requestBuffer.append(bytes.copyOfRange(0, length).toString(Charsets.ISO_8859_1))
-        if (requestBuffer.length > MAX_HEADER_BUFFER) requestBuffer.delete(0, requestBuffer.length - MAX_HEADER_BUFFER)
+        if (length <= 0) return
+        requestQueue.append(bytes, length)
         consumeRequests()
     }
 
     @Synchronized
     fun onServerBytes(bytes: ByteArray, length: Int) {
-        if (length <= 0 || !looksTextual(bytes, length)) return
-        responseBuffer.append(bytes.copyOfRange(0, length).toString(Charsets.ISO_8859_1))
-        if (responseBuffer.length > MAX_HEADER_BUFFER) responseBuffer.delete(0, responseBuffer.length - MAX_HEADER_BUFFER)
+        if (length <= 0) return
+        responseQueue.append(bytes, length)
         consumeResponses()
     }
 
     private fun consumeRequests() {
         while (true) {
-            val end = requestBuffer.indexOf("\r\n\r\n")
-            if (end < 0) return
-            val header = requestBuffer.substring(0, end + 4)
-            requestBuffer.delete(0, end + 4)
+            when (requestMode) {
+                BodyMode.HEADER -> {
+                    val headerEnd = requestQueue.indexOf(HEADER_END)
+                    if (headerEnd < 0) {
+                        requestQueue.trimTo(MAX_HEADER_BUFFER)
+                        return
+                    }
+                    val headerBytes = requestQueue.take(headerEnd + HEADER_END.size)
+                    val lines = headerBytes.toString(Charsets.ISO_8859_1).split("\r\n")
+                    val requestLine = lines.firstOrNull().orEmpty()
+                    val parts = requestLine.split(' ')
+                    if (parts.size < 2 || parts[0] !in METHODS) continue
 
-            val lines = header.split("\r\n")
-            val requestLine = lines.firstOrNull() ?: continue
-            val parts = requestLine.split(' ')
-            if (parts.size < 2 || parts[0] !in METHODS) continue
+                    val method = parts[0]
+                    val target = parts[1]
+                    val host = headerValue(lines, "Host")
+                    val url = when {
+                        target.startsWith("http://", true) || target.startsWith("https://", true) -> target
+                        host != null && target.startsWith("/") ->
+                            (if (secure) "https://" else "http://") + host + target
+                        else -> null
+                    }
 
-            val target = parts[1]
-            val host = headerValue(lines, "Host")
-            val url = when {
-                target.startsWith("http://") || target.startsWith("https://") -> target
-                host != null && target.startsWith("/") -> (if (secure) "https://" else "http://") + host + target
-                else -> null
-            } ?: continue
+                    if (url != null) {
+                        val request = PendingRequest(
+                            method = method,
+                            url = url,
+                            referer = headerValue(lines, "Referer"),
+                            userAgent = headerValue(lines, "User-Agent"),
+                            cookie = headerValue(lines, "Cookie"),
+                        )
+                        pendingRequests.addLast(request)
+                        while (pendingRequests.size > MAX_PENDING) pendingRequests.removeFirst()
+                        publishIfResource(request, null, null, null)
+                    }
 
-            val request = PendingRequest(
-                url = url,
-                referer = headerValue(lines, "Referer"),
-                userAgent = headerValue(lines, "User-Agent"),
-                cookie = headerValue(lines, "Cookie"),
-            )
-            pendingRequests.addLast(request)
-            if (pendingRequests.size > MAX_PENDING) pendingRequests.removeFirst()
+                    val transfer = headerValue(lines, "Transfer-Encoding").orEmpty()
+                    val contentLength = headerValue(lines, "Content-Length")?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+                    when {
+                        transfer.contains("chunked", true) -> requestMode = BodyMode.CHUNK_SIZE
+                        contentLength > 0L -> {
+                            requestRemaining = contentLength
+                            requestMode = BodyMode.FIXED
+                        }
+                        else -> requestMode = BodyMode.HEADER
+                    }
+                }
 
-            publishIfResource(request, mime = null, contentLength = null, fileName = null)
+                BodyMode.FIXED -> {
+                    if (requestQueue.size == 0) return
+                    val n = minOf(requestRemaining, requestQueue.size.toLong()).toInt()
+                    requestQueue.drop(n)
+                    requestRemaining -= n
+                    if (requestRemaining <= 0L) requestMode = BodyMode.HEADER
+                }
+
+                BodyMode.CHUNK_SIZE -> {
+                    val end = requestQueue.indexOf(CRLF)
+                    if (end < 0) return
+                    val line = requestQueue.take(end + 2).toString(Charsets.US_ASCII).trim()
+                    val size = line.substringBefore(';').trim().toLongOrNull(16) ?: run {
+                        requestMode = BodyMode.HEADER
+                        continue
+                    }
+                    if (size == 0L) requestMode = BodyMode.CHUNK_TRAILERS
+                    else {
+                        requestChunkRemaining = size
+                        requestMode = BodyMode.CHUNK_DATA
+                    }
+                }
+
+                BodyMode.CHUNK_DATA -> {
+                    if (requestQueue.size == 0) return
+                    val n = minOf(requestChunkRemaining, requestQueue.size.toLong()).toInt()
+                    requestQueue.drop(n)
+                    requestChunkRemaining -= n
+                    if (requestChunkRemaining <= 0L) requestMode = BodyMode.CHUNK_CRLF
+                }
+
+                BodyMode.CHUNK_CRLF -> {
+                    if (requestQueue.size < 2) return
+                    requestQueue.drop(2)
+                    requestMode = BodyMode.CHUNK_SIZE
+                }
+
+                BodyMode.CHUNK_TRAILERS -> {
+                    if (requestQueue.startsWith(CRLF)) {
+                        requestQueue.drop(2)
+                        requestMode = BodyMode.HEADER
+                        continue
+                    }
+                    val end = requestQueue.indexOf(HEADER_END)
+                    if (end < 0) return
+                    requestQueue.drop(end + HEADER_END.size)
+                    requestMode = BodyMode.HEADER
+                }
+
+                BodyMode.UNTIL_CLOSE -> return
+            }
         }
     }
 
     private fun consumeResponses() {
         while (true) {
-            val httpStart = responseBuffer.indexOf("HTTP/")
-            if (httpStart < 0) {
-                if (responseBuffer.length > 8192) responseBuffer.clear()
-                return
-            }
-            if (httpStart > 0) responseBuffer.delete(0, httpStart)
+            when (responseMode) {
+                BodyMode.HEADER -> {
+                    val headerEnd = responseQueue.indexOf(HEADER_END)
+                    if (headerEnd < 0) {
+                        responseQueue.trimTo(MAX_HEADER_BUFFER)
+                        return
+                    }
 
-            val end = responseBuffer.indexOf("\r\n\r\n")
-            if (end < 0) return
-            val header = responseBuffer.substring(0, end + 4)
-            responseBuffer.delete(0, end + 4)
+                    val headerBytes = responseQueue.take(headerEnd + HEADER_END.size)
+                    val lines = headerBytes.toString(Charsets.ISO_8859_1).split("\r\n")
+                    val statusCode = lines.firstOrNull()
+                        ?.split(' ')
+                        ?.getOrNull(1)
+                        ?.toIntOrNull()
+                        ?: continue
 
-            val lines = header.split("\r\n")
-            val statusCode = lines.firstOrNull()
-                ?.split(' ')
-                ?.getOrNull(1)
-                ?.toIntOrNull()
-            val mime = headerValue(lines, "Content-Type")
-            val length = headerValue(lines, "Content-Length")?.toLongOrNull()
-            val disposition = headerValue(lines, "Content-Disposition")
-            val fileName = parseFileName(disposition)
-            val request = if (pendingRequests.isEmpty()) continue else pendingRequests.removeFirst()
+                    if (statusCode in 100..199 && statusCode != 101) {
+                        continue
+                    }
 
-            val location = headerValue(lines, "Location")
-            if (statusCode != null && statusCode in 300..399 && !location.isNullOrBlank()) {
-                val redirected = runCatching {
-                    java.net.URI(request.url).resolve(location).toString()
-                }.getOrNull()
-                if (redirected != null) {
-                    publishIfResource(
-                        request.copy(url = redirected),
-                        mime = null,
-                        contentLength = null,
-                        fileName = fileName,
+                    val request = if (pendingRequests.isEmpty()) null else pendingRequests.removeFirst()
+                    if (request == null) {
+                        responseMode = BodyMode.UNTIL_CLOSE
+                        responseQueue.clear()
+                        return
+                    }
+
+                    val mime = headerValue(lines, "Content-Type")
+                    val contentLength = headerValue(lines, "Content-Length")?.toLongOrNull()?.takeIf { it >= 0L }
+                    val disposition = headerValue(lines, "Content-Disposition")
+                    val fileName = parseFileName(disposition)
+                    val location = headerValue(lines, "Location")
+
+                    if (statusCode in 300..399 && !location.isNullOrBlank()) {
+                        val redirected = runCatching { URI(request.url).resolve(location).toString() }.getOrNull()
+                        if (redirected != null) {
+                            publishIfResource(request.copy(url = redirected), null, null, fileName)
+                        }
+                    }
+
+                    val resource = publishIfResource(request, mime, contentLength, fileName)
+                    val streamType = resource?.streamType
+                    responseContext = ResponseContext(
+                        request = request,
+                        resource = resource,
+                        streamType = streamType,
+                        body = if (streamType != null) ByteArrayOutputStream() else null,
                     )
+
+                    val noBody = request.method.equals("HEAD", true) ||
+                        statusCode == 204 || statusCode == 304 ||
+                        statusCode in 100..199
+
+                    if (noBody) {
+                        finishResponse()
+                        responseMode = BodyMode.HEADER
+                        continue
+                    }
+
+                    val transfer = headerValue(lines, "Transfer-Encoding").orEmpty()
+                    when {
+                        transfer.contains("chunked", true) -> responseMode = BodyMode.CHUNK_SIZE
+                        contentLength != null -> {
+                            responseRemaining = contentLength
+                            if (contentLength == 0L) {
+                                finishResponse()
+                                responseMode = BodyMode.HEADER
+                            } else {
+                                responseMode = BodyMode.FIXED
+                            }
+                        }
+                        headerValue(lines, "Connection").equals("close", true) -> {
+                            responseMode = BodyMode.UNTIL_CLOSE
+                            responseQueue.clear()
+                            return
+                        }
+                        else -> {
+                            responseMode = BodyMode.UNTIL_CLOSE
+                            responseQueue.clear()
+                            return
+                        }
+                    }
+                }
+
+                BodyMode.FIXED -> {
+                    if (responseQueue.size == 0) return
+                    val n = minOf(responseRemaining, responseQueue.size.toLong()).toInt()
+                    captureResponseBody(responseQueue.peek(n))
+                    responseQueue.drop(n)
+                    responseRemaining -= n
+                    if (responseRemaining <= 0L) {
+                        finishResponse()
+                        responseMode = BodyMode.HEADER
+                    }
+                }
+
+                BodyMode.CHUNK_SIZE -> {
+                    val end = responseQueue.indexOf(CRLF)
+                    if (end < 0) return
+                    val line = responseQueue.take(end + 2).toString(Charsets.US_ASCII).trim()
+                    val size = line.substringBefore(';').trim().toLongOrNull(16) ?: run {
+                        responseMode = BodyMode.UNTIL_CLOSE
+                        responseQueue.clear()
+                        return
+                    }
+                    if (size == 0L) responseMode = BodyMode.CHUNK_TRAILERS
+                    else {
+                        responseChunkRemaining = size
+                        responseMode = BodyMode.CHUNK_DATA
+                    }
+                }
+
+                BodyMode.CHUNK_DATA -> {
+                    if (responseQueue.size == 0) return
+                    val n = minOf(responseChunkRemaining, responseQueue.size.toLong()).toInt()
+                    captureResponseBody(responseQueue.peek(n))
+                    responseQueue.drop(n)
+                    responseChunkRemaining -= n
+                    if (responseChunkRemaining <= 0L) responseMode = BodyMode.CHUNK_CRLF
+                }
+
+                BodyMode.CHUNK_CRLF -> {
+                    if (responseQueue.size < 2) return
+                    responseQueue.drop(2)
+                    responseMode = BodyMode.CHUNK_SIZE
+                }
+
+                BodyMode.CHUNK_TRAILERS -> {
+                    if (responseQueue.startsWith(CRLF)) {
+                        responseQueue.drop(2)
+                        finishResponse()
+                        responseMode = BodyMode.HEADER
+                        continue
+                    }
+                    val end = responseQueue.indexOf(HEADER_END)
+                    if (end < 0) return
+                    responseQueue.drop(end + HEADER_END.size)
+                    finishResponse()
+                    responseMode = BodyMode.HEADER
+                }
+
+                BodyMode.UNTIL_CLOSE -> {
+                    responseQueue.clear()
+                    return
+                }
+            }
+        }
+    }
+
+    private fun captureResponseBody(bytes: ByteArray) {
+        val out = responseContext?.body ?: return
+        if (out.size() >= MAX_MANIFEST_BYTES) return
+        val writable = minOf(bytes.size, MAX_MANIFEST_BYTES - out.size())
+        out.write(bytes, 0, writable)
+    }
+
+    private fun finishResponse() {
+        val context = responseContext
+        responseContext = null
+        val resource = context?.resource ?: return
+        val body = context.body?.toByteArray() ?: return
+        if (body.isEmpty()) return
+
+        val text = decodeManifest(body)
+        val enriched = when (context.streamType) {
+            StreamType.HLS -> enrichHls(resource, text)
+            StreamType.DASH -> enrichDash(resource, text)
+            else -> resource
+        }
+        if (enriched != resource) SnifferRepository.add(enriched)
+    }
+
+    private fun decodeManifest(bytes: ByteArray): String {
+        return bytes.toString(Charsets.UTF_8)
+            .removePrefix("\uFEFF")
+            .take(MAX_MANIFEST_CHARS)
+    }
+
+    private fun enrichHls(resource: Resource, manifest: String): Resource {
+        var maxWidth = resource.width
+        var maxHeight = resource.height
+        var durationSeconds = 0.0
+
+        manifest.lineSequence().forEach { raw ->
+            val line = raw.trim()
+            if (line.startsWith("#EXT-X-STREAM-INF:", true)) {
+                val resolution = Regex("""RESOLUTION=(\d+)x(\d+)""", RegexOption.IGNORE_CASE)
+                    .find(line)
+                val width = resolution?.groupValues?.getOrNull(1)?.toIntOrNull()
+                val height = resolution?.groupValues?.getOrNull(2)?.toIntOrNull()
+                if (width != null && height != null) {
+                    if ((width.toLong() * height) > ((maxWidth ?: 0).toLong() * (maxHeight ?: 0))) {
+                        maxWidth = width
+                        maxHeight = height
+                    }
+                }
+            } else if (line.startsWith("#EXTINF:", true)) {
+                durationSeconds += line.substringAfter(':').substringBefore(',').toDoubleOrNull() ?: 0.0
+            }
+        }
+
+        return resource.copy(
+            width = maxWidth,
+            height = maxHeight,
+            durationMs = resource.durationMs ?: durationSeconds.takeIf { it > 0.0 }?.times(1000.0)?.toLong(),
+        )
+    }
+
+    private fun enrichDash(resource: Resource, manifest: String): Resource {
+        var maxWidth = resource.width
+        var maxHeight = resource.height
+
+        Regex("""<Representation\b[^>]*>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            .findAll(manifest)
+            .forEach { match ->
+                val tag = match.value
+                val width = Regex("""\bwidth=["'](\d+)["']""", RegexOption.IGNORE_CASE)
+                    .find(tag)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                val height = Regex("""\bheight=["'](\d+)["']""", RegexOption.IGNORE_CASE)
+                    .find(tag)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                if (width != null && height != null) {
+                    if ((width.toLong() * height) > ((maxWidth ?: 0).toLong() * (maxHeight ?: 0))) {
+                        maxWidth = width
+                        maxHeight = height
+                    }
                 }
             }
 
-            publishIfResource(request, mime, length, fileName)
-        }
+        val duration = Regex("""mediaPresentationDuration=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+            .find(manifest)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.let(::parseIsoDurationMs)
+
+        return resource.copy(
+            width = maxWidth,
+            height = maxHeight,
+            durationMs = resource.durationMs ?: duration,
+        )
+    }
+
+    private fun parseIsoDurationMs(value: String): Long? {
+        val match = Regex(
+            """P(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?""",
+            RegexOption.IGNORE_CASE,
+        ).matchEntire(value) ?: return null
+        val days = match.groupValues[1].toDoubleOrNull() ?: 0.0
+        val hours = match.groupValues[2].toDoubleOrNull() ?: 0.0
+        val minutes = match.groupValues[3].toDoubleOrNull() ?: 0.0
+        val seconds = match.groupValues[4].toDoubleOrNull() ?: 0.0
+        val total = days * 86400.0 + hours * 3600.0 + minutes * 60.0 + seconds
+        return total.takeIf { it > 0.0 }?.times(1000.0)?.toLong()
     }
 
     private fun publishIfResource(
@@ -131,7 +435,7 @@ class HttpResourceStreamInspector(
         mime: String?,
         contentLength: Long?,
         fileName: String?,
-    ) {
+    ): Resource? {
         val classificationUrl = if (!fileName.isNullOrBlank()) {
             val separator = if (request.url.contains('?')) '&' else '?'
             request.url + separator + "filename=" + Uri.encode(fileName)
@@ -140,40 +444,37 @@ class HttpResourceStreamInspector(
         }
 
         val classification = ResourceClassifier.classify(classificationUrl, mime)
-        if (classification.type == ResourceType.OTHER) return
+        if (classification.type == ResourceType.OTHER) return null
 
         val uri = runCatching { Uri.parse(request.url) }.getOrNull()
         val extension = fileName
             ?.substringAfterLast('.', "")
             ?.lowercase()
             ?.takeIf { it.isNotBlank() }
-            ?: uri?.lastPathSegment
-                ?.substringAfterLast('.', "")
-                ?.lowercase()
-                ?.takeIf { it.isNotBlank() }
+            ?: ResourceClassifier.extensionFromUrl(request.url).ifBlank { null }
 
-        SnifferRepository.add(
-            Resource(
-                id = ids.getAndIncrement(),
-                sessionId = SessionStore.idOrDefault(),
-                sourceAppPackage = sourcePackage,
-                sourceAppName = sourceName,
-                url = request.url,
-                host = uri?.host ?: "未知來源",
-                mimeType = mime,
-                extension = extension,
-                contentLength = contentLength,
-                type = classification.type,
-                streamType = classification.streamType,
-                referer = request.referer,
-                userAgent = request.userAgent,
-                cookie = request.cookie,
-            )
+        val resource = Resource(
+            id = ids.getAndIncrement(),
+            sessionId = SessionStore.idOrDefault(),
+            sourceAppPackage = sourcePackage,
+            sourceAppName = sourceName,
+            url = request.url,
+            host = uri?.host ?: "未知來源",
+            mimeType = mime,
+            extension = extension,
+            contentLength = contentLength,
+            type = classification.type,
+            streamType = classification.streamType,
+            referer = request.referer,
+            userAgent = request.userAgent,
+            cookie = request.cookie,
         )
+        SnifferRepository.add(resource)
+        return resource
     }
 
     private fun headerValue(lines: List<String>, name: String): String? =
-        lines.firstOrNull { it.startsWith("$name:", ignoreCase = true) }
+        lines.firstOrNull { it.startsWith(name + ":", ignoreCase = true) }
             ?.substringAfter(':')
             ?.trim()
             ?.takeIf { it.isNotBlank() }
@@ -194,20 +495,66 @@ class HttpResourceStreamInspector(
             ?.trim()
     }
 
-    private fun looksTextual(bytes: ByteArray, length: Int): Boolean {
-        val sample = minOf(length, 16)
-        if (sample == 0) return false
-        var printable = 0
-        for (i in 0 until sample) {
-            val c = bytes[i].toInt() and 0xff
-            if (c == 9 || c == 10 || c == 13 || c in 32..126) printable++
+    private class ByteQueue {
+        private var data = ByteArray(0)
+
+        val size: Int get() = data.size
+
+        fun append(bytes: ByteArray, length: Int) {
+            if (length <= 0) return
+            val incoming = bytes.copyOfRange(0, length)
+            data = if (data.isEmpty()) incoming else data + incoming
         }
-        return printable >= sample * 3 / 4
+
+        fun indexOf(needle: ByteArray): Int {
+            if (needle.isEmpty() || data.size < needle.size) return -1
+            outer@ for (i in 0..data.size - needle.size) {
+                for (j in needle.indices) {
+                    if (data[i + j] != needle[j]) continue@outer
+                }
+                return i
+            }
+            return -1
+        }
+
+        fun startsWith(prefix: ByteArray): Boolean {
+            if (data.size < prefix.size) return false
+            return prefix.indices.all { data[it] == prefix[it] }
+        }
+
+        fun take(count: Int): ByteArray {
+            val n = count.coerceIn(0, data.size)
+            val out = data.copyOfRange(0, n)
+            drop(n)
+            return out
+        }
+
+        fun peek(count: Int): ByteArray {
+            val n = count.coerceIn(0, data.size)
+            return data.copyOfRange(0, n)
+        }
+
+        fun drop(count: Int) {
+            val n = count.coerceIn(0, data.size)
+            data = if (n >= data.size) ByteArray(0) else data.copyOfRange(n, data.size)
+        }
+
+        fun trimTo(maxBytes: Int) {
+            if (data.size > maxBytes) data = data.copyOfRange(data.size - maxBytes, data.size)
+        }
+
+        fun clear() {
+            data = ByteArray(0)
+        }
     }
 
     companion object {
         private const val MAX_HEADER_BUFFER = 128 * 1024
         private const val MAX_PENDING = 128
+        private const val MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+        private const val MAX_MANIFEST_CHARS = 2 * 1024 * 1024
+        private val HEADER_END = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
+        private val CRLF = "\r\n".toByteArray(Charsets.US_ASCII)
         private val METHODS = setOf("GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "PATCH")
     }
 }
