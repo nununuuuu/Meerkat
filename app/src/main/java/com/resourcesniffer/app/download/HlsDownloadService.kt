@@ -126,7 +126,9 @@ class HlsDownloadService : Service() {
 
         val audioUrl = selection?.audio?.uri
         if (audioUrl.isNullOrBlank()) {
-            return writeSinglePlaylist(videoPlaylist, headers, recordId)
+            val localUri = writeSinglePlaylist(videoPlaylist, headers, recordId)
+            saveSubtitleSidecar(selection?.subtitle, headers, recordId)
+            return localUri
         }
 
         val audioManifest = fetchText(audioUrl, headers)
@@ -152,11 +154,13 @@ class HlsDownloadService : Service() {
 
             ensureNotCancelled(recordId)
             muxTracks(videoTemp, audioTemp, muxed)
-            return copyFileToDownloads(
+            val localUri = copyFileToDownloads(
                 muxed,
                 "Meerkat-" + System.currentTimeMillis() + ".mp4",
                 "video/mp4",
             )
+            saveSubtitleSidecar(selection?.subtitle, headers, recordId)
+            return localUri
         } finally {
             videoTemp.delete()
             audioTemp.delete()
@@ -588,6 +592,101 @@ class HlsDownloadService : Service() {
             muxer.release()
             videoExtractor.release()
             audioExtractor.release()
+        }
+    }
+
+    private fun saveSubtitleSidecar(
+        subtitle: MasterMedia?,
+        headers: Map<String, String>,
+        recordId: String?,
+    ) {
+        val url = subtitle?.uri ?: return
+        ensureNotCancelled(recordId)
+
+        val manifest = fetchText(url, headers)
+        val safeLabel = (subtitle.language ?: subtitle.name ?: "subtitle")
+            .replace(Regex("""[^A-Za-z0-9._-]+"""), "_")
+            .take(40)
+            .ifBlank { "subtitle" }
+
+        if (!manifest.trimStart().startsWith("#EXTM3U", true)) {
+            copyBytesToDownloads(
+                manifest.toByteArray(Charsets.UTF_8),
+                "Meerkat-" + System.currentTimeMillis() + "-" + safeLabel + ".vtt",
+                "text/vtt",
+            )
+            return
+        }
+
+        val playlist = parseMediaPlaylist(manifest, url)
+        if (playlist.segments.isEmpty()) {
+            copyBytesToDownloads(
+                manifest.toByteArray(Charsets.UTF_8),
+                "Meerkat-" + System.currentTimeMillis() + "-" + safeLabel + ".m3u8",
+                "application/vnd.apple.mpegurl",
+            )
+            return
+        }
+
+        val firstPath = playlist.segments.first().url.substringBefore('?').lowercase()
+        val isWebVtt = firstPath.endsWith(".vtt") || firstPath.endsWith(".webvtt")
+        if (!isWebVtt) {
+            copyBytesToDownloads(
+                manifest.toByteArray(Charsets.UTF_8),
+                "Meerkat-" + System.currentTimeMillis() + "-" + safeLabel + ".m3u8",
+                "application/vnd.apple.mpegurl",
+            )
+            return
+        }
+
+        val output = StringBuilder("WEBVTT\n\n")
+        playlist.segments.forEach { segment ->
+            ensureNotCancelled(recordId)
+            var text = fetchBytes(segment.url, headers, segment.range)
+                .toString(Charsets.UTF_8)
+                .removePrefix("\uFEFF")
+                .trim()
+            if (text.startsWith("WEBVTT", true)) {
+                text = text.substringAfter('\n', "").trimStart()
+            }
+            if (text.isNotBlank()) {
+                output.append(text)
+                if (!text.endsWith("\n")) output.append('\n')
+                output.append('\n')
+            }
+        }
+
+        copyBytesToDownloads(
+            output.toString().toByteArray(Charsets.UTF_8),
+            "Meerkat-" + System.currentTimeMillis() + "-" + safeLabel + ".vtt",
+            "text/vtt",
+        )
+    }
+
+    private fun copyBytesToDownloads(bytes: ByteArray, displayName: String, mimeType: String): String {
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+            put(MediaStore.Downloads.MIME_TYPE, mimeType)
+            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Meerkat")
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: error("無法建立字幕檔案")
+        try {
+            contentResolver.openOutputStream(uri, "w")?.use { output ->
+                output.write(bytes)
+                output.flush()
+            } ?: error("無法寫入字幕檔案")
+            contentResolver.update(
+                uri,
+                ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) },
+                null,
+                null,
+            )
+            return uri.toString()
+        } catch (error: Throwable) {
+            runCatching { contentResolver.delete(uri, null, null) }
+            throw error
         }
     }
 
