@@ -81,8 +81,18 @@ object ResourceValidator {
                     fileName == null ||
                     classification.type == ResourceType.IMAGE
 
+            var sniffedType: ResourceType? = null
+            var sniffedMime: String? = null
+            var sniffedExtension: String? = null
+
             if (needsProbe) {
-                val range = if (classification.type == ResourceType.IMAGE) "bytes=0-262143" else "bytes=0-0"
+                val isUnknownBinary = classification.type == ResourceType.OTHER ||
+                    mime.equals("application/octet-stream", true)
+                val range = when {
+                    classification.type == ResourceType.IMAGE -> "bytes=0-262143"
+                    isUnknownBinary -> "bytes=0-65535"
+                    else -> "bytes=0-0"
+                }
                 val get = open(resource.copy(url = finalUrl), "GET", range)
                 if (get.responseCode in 200..299 || get.responseCode == HttpURLConnection.HTTP_PARTIAL) {
                     finalUrl = get.url?.toString() ?: finalUrl
@@ -101,27 +111,54 @@ object ResourceValidator {
                         else -> length
                     }
 
-                    if (classification.type == ResourceType.IMAGE) {
-                        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                        get.inputStream.use { BitmapFactory.decodeStream(it, null, options) }
-                        if (options.outWidth > 0 && options.outHeight > 0) {
-                            width = options.outWidth
-                            height = options.outHeight
+                    when {
+                        classification.type == ResourceType.IMAGE -> {
+                            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                            get.inputStream.use { BitmapFactory.decodeStream(it, null, options) }
+                            if (options.outWidth > 0 && options.outHeight > 0) {
+                                width = options.outWidth
+                                height = options.outHeight
+                            }
                         }
-                    } else {
-                        runCatching { get.inputStream.close() }
+
+                        isUnknownBinary -> {
+                            val prefix = get.inputStream.use { input ->
+                                val out = ByteArray(65_536)
+                                var offset = 0
+                                while (offset < out.size) {
+                                    val read = input.read(out, offset, out.size - offset)
+                                    if (read <= 0) break
+                                    offset += read
+                                }
+                                out.copyOf(offset)
+                            }
+                            sniffSignature(prefix)?.let { sniff ->
+                                sniffedType = sniff.type
+                                sniffedMime = sniff.mime
+                                sniffedExtension = sniff.extension
+                                if (mime.isNullOrBlank() || mime.equals("application/octet-stream", true)) {
+                                    mime = sniff.mime
+                                }
+                            }
+                        }
+
+                        else -> runCatching { get.inputStream.close() }
                     }
                 }
                 get.disconnect()
             }
 
             classification = ResourceClassifier.classify(classificationUrl(), mime)
+            if (classification.type == ResourceType.OTHER && sniffedType != null) {
+                classification = ResourceClassifier.Classification(sniffedType!!, null)
+            }
             val parsed = runCatching { Uri.parse(finalUrl) }.getOrNull()
             val extension = fileName
                 ?.substringAfterLast('.', "")
                 ?.lowercase()
                 ?.takeIf { it.isNotBlank() }
                 ?: ResourceClassifier.extensionFromUrl(finalUrl).takeIf { it.isNotBlank() }
+                ?: sniffedExtension
                 ?: resource.extension
 
             resource.copy(
@@ -147,6 +184,85 @@ object ResourceValidator {
                 verifiedAt = System.currentTimeMillis(),
             )
         }
+    }
+
+    private data class Signature(
+        val type: ResourceType,
+        val mime: String,
+        val extension: String?,
+    )
+
+    private fun sniffSignature(bytes: ByteArray): Signature? {
+        if (bytes.isEmpty()) return null
+
+        fun starts(vararg values: Int): Boolean =
+            bytes.size >= values.size && values.indices.all { index ->
+                (bytes[index].toInt() and 0xff) == values[index]
+            }
+
+        if (bytes.size >= 5 && bytes.copyOfRange(0, 5).toString(Charsets.US_ASCII) == "%PDF-") {
+            return Signature(ResourceType.DOCUMENT, "application/pdf", "pdf")
+        }
+        if (starts(0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)) {
+            return Signature(ResourceType.IMAGE, "image/png", "png")
+        }
+        if (starts(0xFF, 0xD8, 0xFF)) {
+            return Signature(ResourceType.IMAGE, "image/jpeg", "jpg")
+        }
+        if (bytes.size >= 6) {
+            val sig = bytes.copyOfRange(0, 6).toString(Charsets.US_ASCII)
+            if (sig == "GIF87a" || sig == "GIF89a") {
+                return Signature(ResourceType.IMAGE, "image/gif", "gif")
+            }
+        }
+        if (bytes.size >= 12 &&
+            bytes.copyOfRange(0, 4).toString(Charsets.US_ASCII) == "RIFF" &&
+            bytes.copyOfRange(8, 12).toString(Charsets.US_ASCII) == "WEBP"
+        ) {
+            return Signature(ResourceType.IMAGE, "image/webp", "webp")
+        }
+        if (bytes.size >= 12 && bytes.copyOfRange(4, 8).toString(Charsets.US_ASCII) == "ftyp") {
+            return Signature(ResourceType.VIDEO, "video/mp4", "mp4")
+        }
+        if (starts(0x52, 0x61, 0x72, 0x21, 0x1A, 0x07)) {
+            return Signature(ResourceType.ARCHIVE, "application/vnd.rar", "rar")
+        }
+        if (starts(0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C)) {
+            return Signature(ResourceType.ARCHIVE, "application/x-7z-compressed", "7z")
+        }
+        if (starts(0x1F, 0x8B)) {
+            return Signature(ResourceType.ARCHIVE, "application/gzip", "gz")
+        }
+        if (starts(0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1)) {
+            return Signature(ResourceType.DOCUMENT, "application/x-ole-storage", null)
+        }
+        if (starts(0x50, 0x4B, 0x03, 0x04)) {
+            val text = bytes.toString(Charsets.ISO_8859_1)
+            return when {
+                text.contains("word/") ->
+                    Signature(
+                        ResourceType.DOCUMENT,
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "docx",
+                    )
+                text.contains("ppt/") ->
+                    Signature(
+                        ResourceType.DOCUMENT,
+                        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        "pptx",
+                    )
+                text.contains("xl/") ->
+                    Signature(
+                        ResourceType.DOCUMENT,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "xlsx",
+                    )
+                text.contains("mimetypeapplication/epub+zip") ->
+                    Signature(ResourceType.DOCUMENT, "application/epub+zip", "epub")
+                else -> Signature(ResourceType.ARCHIVE, "application/zip", "zip")
+            }
+        }
+        return null
     }
 
     private fun parseDispositionFileName(value: String?): String? {
