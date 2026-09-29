@@ -48,7 +48,8 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.datastore:datastore-preferences:1.1.7")
-    implementation("org.mozilla.geckoview:geckoview-nightly:159.0.20260927205153")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.82")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.82")
     implementation(files("libs/netstack.aar"))
 
     debugImplementation("androidx.compose.ui:ui-tooling")
