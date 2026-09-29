@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicLong
 class HttpResourceStreamInspector(
     private val sourcePackage: String?,
     private val sourceName: String? = null,
+    private val secure: Boolean = false,
 ) {
     private data class PendingRequest(
         val url: String,
@@ -64,7 +65,7 @@ class HttpResourceStreamInspector(
             val host = headerValue(lines, "Host")
             val url = when {
                 target.startsWith("http://") || target.startsWith("https://") -> target
-                host != null && target.startsWith("/") -> "http://$host$target"
+                host != null && target.startsWith("/") -> (if (secure) "https://" else "http://") + host + target
                 else -> null
             } ?: continue
 
