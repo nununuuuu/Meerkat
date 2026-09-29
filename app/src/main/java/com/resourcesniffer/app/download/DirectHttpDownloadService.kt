@@ -253,13 +253,26 @@ class DirectHttpDownloadService : Service() {
         )
         val mime = responseMime ?: latest.mimeType ?: "application/octet-stream"
 
-        val values = ContentValues().apply {
-            put(MediaStore.Downloads.DISPLAY_NAME, name)
-            put(MediaStore.Downloads.MIME_TYPE, mime)
-            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Meerkat")
-            put(MediaStore.Downloads.IS_PENDING, 1)
+        val collection = when {
+            mime.startsWith("image/") -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            mime.startsWith("video/") -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            mime.startsWith("audio/") -> MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            else -> MediaStore.Downloads.EXTERNAL_CONTENT_URI
         }
-        val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+        val relativePath = when {
+            mime.startsWith("image/") -> Environment.DIRECTORY_PICTURES + "/Meerkat"
+            mime.startsWith("video/") -> Environment.DIRECTORY_MOVIES + "/Meerkat"
+            mime.startsWith("audio/") -> Environment.DIRECTORY_MUSIC + "/Meerkat"
+            else -> Environment.DIRECTORY_DOWNLOADS + "/Meerkat"
+        }
+
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = contentResolver.insert(collection, values)
             ?: error("無法建立下載檔案")
 
         try {
@@ -269,7 +282,7 @@ class DirectHttpDownloadService : Service() {
 
             contentResolver.update(
                 uri,
-                ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) },
+                ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
                 null,
                 null,
             )
