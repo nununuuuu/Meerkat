@@ -185,7 +185,7 @@ private fun MeerkatApp(
                     NavigationBarItem(
                         selected = mode == MainMode.EXTERNAL,
                         onClick = { mode = MainMode.EXTERNAL },
-                        icon = { Icon(Icons.Default.Security, null) },
+                        icon = { Icon(Icons.Default.Public, null) },
                         label = { Text("App") },
                     )
                     NavigationBarItem(
