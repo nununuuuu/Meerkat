@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
+import com.resourcesniffer.app.capture.MitmCertificateAuthority
 import com.resourcesniffer.app.capture.SnifferVpnService
 import com.resourcesniffer.app.core.InstalledApp
 import com.resourcesniffer.app.core.MediaIdentity
@@ -90,6 +91,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .toList()
     }
 
+    fun mitmCaInstallIntent(): Intent =
+        MitmCertificateAuthority(getApplication<Application>()).installIntent()
+
+    fun isMitmCaInstalled(): Boolean =
+        MitmCertificateAuthority(getApplication<Application>()).isInstalledInAndroidCaStore()
+
+    fun mitmCaFingerprint(): String =
+        MitmCertificateAuthority(getApplication<Application>()).fingerprintSha256()
     fun startExternalCapture(packageName: String) {
         val context = getApplication<Application>()
         val pm = context.packageManager
@@ -102,6 +111,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             Intent(context, SnifferVpnService::class.java).apply {
                 action = SnifferVpnService.ACTION_START
                 putExtra(SnifferVpnService.EXTRA_TARGET_PACKAGE, packageName)
+                putExtra(
+                    SnifferVpnService.EXTRA_ENABLE_HTTPS_MITM,
+                    MitmCertificateAuthority(context).isInstalledInAndroidCaStore(),
+                )
             }
         )
         context.packageManager.getLaunchIntentForPackage(packageName)?.let { launch ->
