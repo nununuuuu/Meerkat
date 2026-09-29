@@ -5,6 +5,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.net.VpnService
+import android.net.ConnectivityManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.resourcesniffer.app.MainActivity
@@ -47,7 +48,21 @@ class SnifferVpnService : VpnService() {
             .setMtu(1500)
             .addAddress("10.73.0.1", 32)
             .addRoute("0.0.0.0", 0)
-            .addDnsServer("1.1.1.1")
+
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+        val dnsServers = connectivity.activeNetwork
+            ?.let(connectivity::getLinkProperties)
+            ?.dnsServers
+            .orEmpty()
+            .filter { !it.isLoopbackAddress && !it.isAnyLocalAddress }
+            .distinct()
+
+        if (dnsServers.isEmpty()) {
+            builder.addDnsServer("1.1.1.1")
+            builder.addDnsServer("8.8.8.8")
+        } else {
+            dnsServers.forEach(builder::addDnsServer)
+        }
 
         // Global mode: capture all device traffic except Meerkat itself.
         // Proxy/upstream sockets are also protected individually, but excluding
