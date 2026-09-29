@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -60,12 +60,6 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Prepare release asset
-        if: github.ref == 'refs/heads/main'
-        run: |
-          cp app/build/outputs/apk/debug/app-debug.apk Meerkat-v0.6.0-beta2-debug.apk
-          sha256sum Meerkat-v0.6.0-beta2-debug.apk > Meerkat-v0.6.0-beta2-debug.apk.sha256
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -73,25 +67,3 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
-      - name: Publish v0.6.0-beta2
-        if: github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cat > release-notes.md <<'EOF'
-          Meerkat v0.6.0-beta2
-
-          Changes since beta1:
-          - Replaced the external-app picker with one-tap global capture. Start sniffing once, then leave Meerkat and open any app yourself.
-          - Floating overlay is now bound to the active global capture session.
-          - Instagram deep links stay inside Meerkat's browser instead of repeatedly redirecting to the app store.
-          - Android 11+ CA workflow now exports Meerkat-Local-CA.crt to Downloads/Meerkat and opens security settings for manual CA installation.
-          - Resource UI is grouped into four user-facing categories: Images, Videos, Documents, Other.
-          - HLS/DASH remain grouped under Videos; PDF/Word/PowerPoint/Excel/EPUB/text files under Documents; audio/archives/uncategorized files under Other.
-
-          Notes:
-          - Apps that reject user-installed CAs or use certificate pinning may still be opaque to HTTPS MITM without root/hooking.
-          - DRM/CENC content is detected but not decrypted.
-          EOF
-
-          gh release create v0.6.0-beta2             Meerkat-v0.6.0-beta2-debug.apk             Meerkat-v0.6.0-beta2-debug.apk.sha256             --repo "$GITHUB_REPOSITORY"             --target "$GITHUB_SHA"             --title "Meerkat v0.6.0-beta2"             --prerelease             --notes-file release-notes.md
