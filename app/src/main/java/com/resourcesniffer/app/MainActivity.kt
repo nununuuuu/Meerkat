@@ -70,7 +70,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
-import com.resourcesniffer.app.core.InstalledApp
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.download.DownloadHelper
@@ -128,25 +127,38 @@ private fun MeerkatApp(
     var mode by remember { mutableStateOf(if (incomingUrl != null) MainMode.BROWSER else MainMode.RESOURCES) }
     var address by remember { mutableStateOf(incomingUrl ?: "https://www.google.com/") }
     var webView by remember { mutableStateOf<WebView?>(null) }
-    var selectedPackage by remember { mutableStateOf<String?>(null) }
     var externalCaptureActive by remember { mutableStateOf(false) }
     var mitmCaInstalled by remember { mutableStateOf(viewModel.isMitmCaInstalled()) }
-
-    val apps = remember { viewModel.installedApps() }
-
-    val vpnLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            selectedPackage?.let {
-                viewModel.startExternalCapture(it)
-                externalCaptureActive = true
-                viewModel.startOverlay()
-            }
-        }
-    }
 
     val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     val caInstallLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         mitmCaInstalled = viewModel.isMitmCaInstalled()
+    }
+    val overlayLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        if (Settings.canDrawOverlays(context)) {
+            viewModel.startOverlay()
+        }
+    }
+
+    val beginGlobalCapture: () -> Unit = {
+        viewModel.startExternalCapture()
+        externalCaptureActive = true
+        if (Settings.canDrawOverlays(context)) {
+            viewModel.startOverlay()
+        } else {
+            overlayLauncher.launch(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:${context.packageName}"),
+                )
+            )
+        }
+    }
+
+    val vpnLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            beginGlobalCapture()
+        }
     }
 
     LaunchedEffect(incomingUrl) {
@@ -170,7 +182,7 @@ private fun MeerkatApp(
                             Text("Meerkat", fontWeight = FontWeight.SemiBold)
                             Text(
                                 when {
-                                    externalCaptureActive -> "正在嗅探外部 App"
+                                    externalCaptureActive -> "正在全域嗅探"
                                     currentSession != null -> "已建立嗅探工作階段"
                                     else -> "資源嗅探與下載"
                                 },
@@ -228,26 +240,16 @@ private fun MeerkatApp(
                         onOpenResources = { mode = MainMode.RESOURCES },
                     )
                     MainMode.EXTERNAL -> ExternalAppPane(
-                        apps = apps,
-                        selectedPackage = selectedPackage,
                         captureActive = externalCaptureActive,
-                        onSelected = { selectedPackage = it },
                         onStart = {
-                            val pkg = selectedPackage
-                            if (pkg == null) {
-                                Toast.makeText(context, "請先選擇 App", Toast.LENGTH_SHORT).show()
+                            if (Build.VERSION.SDK_INT >= 33) {
+                                notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                            val prepare = VpnService.prepare(context)
+                            if (prepare != null) {
+                                vpnLauncher.launch(prepare)
                             } else {
-                                if (Build.VERSION.SDK_INT >= 33) {
-                                    notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                                }
-                                val prepare = VpnService.prepare(context)
-                                if (prepare != null) {
-                                    vpnLauncher.launch(prepare)
-                                } else {
-                                    viewModel.startExternalCapture(pkg)
-                                    externalCaptureActive = true
-                                    viewModel.startOverlay()
-                                }
+                                beginGlobalCapture()
                             }
                         },
                         onStop = {
@@ -977,91 +979,93 @@ private fun BrowserPane(
 
 @Composable
 private fun ExternalAppPane(
-    apps: List<InstalledApp>,
-    selectedPackage: String?,
     captureActive: Boolean,
-    onSelected: (String) -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
     caInstalled: Boolean,
     caFingerprint: String,
     onInstallCa: () -> Unit,
 ) {
-    var query by remember { mutableStateOf("") }
-    val filtered = remember(query, apps) {
-        if (query.isBlank()) apps
-        else apps.filter {
-            it.label.contains(query, ignoreCase = true) ||
-                it.packageName.contains(query, ignoreCase = true)
-        }
-    }
-
-    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(
+        Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,
             color = MaterialTheme.colorScheme.surfaceVariant,
         ) {
             Column(
-                Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("外部 App 深度嗅探", fontWeight = FontWeight.SemiBold)
+                Text("全域 App 嗅探", fontWeight = FontWeight.SemiBold)
                 Text(
-                    if (caInstalled) "Meerkat CA 已安裝：HTTPS MITM 會自動啟用。" else "要解析 HTTPS 資源，先安裝 Meerkat Local CA。Android 會顯示系統憑證確認畫面。",
+                    "按下開始後，Meerkat 會在背景持續嗅探。你可以直接離開 Meerkat，自行開啟 Instagram、Threads、瀏覽器或其他 App，不需要事先選擇目標 App。",
                     style = MaterialTheme.typography.bodySmall,
                 )
+                Text(
+                    if (caInstalled) {
+                        "HTTPS 深度嗅探已就緒：Meerkat Local CA 已安裝。"
+                    } else {
+                        "尚未安裝 Meerkat Local CA。未安裝時仍可啟動一般嗅探，但 HTTPS 內容可見性會較低。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (!caInstalled) {
+                    OutlinedButton(onClick = onInstallCa) {
+                        Text("安裝 HTTPS CA")
+                    }
+                }
                 Text(
                     "CA SHA-256：" + caFingerprint,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                if (!caInstalled) {
-                    OutlinedButton(onClick = onInstallCa) { Text("安裝 HTTPS CA") }
-                }
                 Text(
-                    "不信任使用者 CA 或使用 certificate pinning 的 App 可能無法解密；這種連線會保留為一般轉送，不代表已取得內容。",
+                    "使用 certificate pinning 或拒絕使用者 CA 的 App 仍可能無法解密；Meerkat 會盡量保持其網路連線正常。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
 
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("搜尋 App") },
-            singleLine = true,
-        )
-
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onStart, enabled = !captureActive && selectedPackage != null) {
-                Text(if (caInstalled) "啟動 HTTPS 深度嗅探" else "啟動一般嗅探")
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Button(
+                onClick = onStart,
+                enabled = !captureActive,
+            ) {
+                Text(if (caInstalled) "開始全域 HTTPS 嗅探" else "開始全域嗅探")
             }
-            OutlinedButton(onClick = onStop, enabled = captureActive) {
-                Text("停止")
+            OutlinedButton(
+                onClick = onStop,
+                enabled = captureActive,
+            ) {
+                Text("停止嗅探")
             }
             if (captureActive) {
-                AssistChip(onClick = {}, label = { Text("嗅探中") })
+                AssistChip(
+                    onClick = {},
+                    label = { Text("背景嗅探中") },
+                )
             }
         }
 
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            items(filtered, key = { it.packageName }) { app ->
-                val selected = selectedPackage == app.packageName
-                ListItem(
-                    headlineContent = { Text(app.label) },
-                    supportingContent = { Text(app.packageName) },
-                    leadingContent = {
-                        RadioButton(
-                            selected = selected,
-                            onClick = { onSelected(app.packageName) },
-                        )
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                HorizontalDivider()
+        if (captureActive) {
+            ElevatedCard(Modifier.fillMaxWidth()) {
+                Column(
+                    Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text("現在可以直接離開 Meerkat", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "自行開啟你要使用的 App。嗅探到的資源會加入目前工作階段，懸浮按鈕會顯示目前捕獲數量。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
         }
     }
