@@ -2,14 +2,11 @@ package com.resourcesniffer.app.ui
 
 import android.app.Application
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import com.resourcesniffer.app.capture.MitmCertificateAuthority
 import com.resourcesniffer.app.capture.SnifferVpnService
-import com.resourcesniffer.app.core.InstalledApp
 import com.resourcesniffer.app.core.MediaIdentity
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceClassifier
@@ -103,30 +100,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         )
     }
-    fun installedApps(): List<InstalledApp> {
-        val context = getApplication<Application>()
-        val pm = context.packageManager
-        val apps = if (Build.VERSION.SDK_INT >= 33) {
-            pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0))
-        } else {
-            @Suppress("DEPRECATION")
-            pm.getInstalledApplications(0)
-        }
-
-        return apps.asSequence()
-            .filter { it.packageName != context.packageName }
-            .filter { pm.getLaunchIntentForPackage(it.packageName) != null }
-            .map {
-                InstalledApp(
-                    label = pm.getApplicationLabel(it).toString(),
-                    packageName = it.packageName,
-                )
-            }
-            .distinctBy { it.packageName }
-            .sortedBy { it.label.lowercase() }
-            .toList()
-    }
-
     fun mitmCaInstallIntent(): Intent =
         MitmCertificateAuthority(getApplication<Application>()).installIntent()
 
@@ -135,33 +108,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun mitmCaFingerprint(): String =
         MitmCertificateAuthority(getApplication<Application>()).fingerprintSha256()
-    fun startExternalCapture(packageName: String) {
+    fun startExternalCapture() {
         val context = getApplication<Application>()
-        val pm = context.packageManager
-        val appName = runCatching {
-            pm.getApplicationLabel(pm.getApplicationInfo(packageName, 0)).toString()
-        }.getOrNull()
-        SessionStore.start(packageName, appName)
+        SessionStore.startExternal(targetPackage = null, targetName = "全域 App 嗅探")
         ContextCompat.startForegroundService(
             context,
             Intent(context, SnifferVpnService::class.java).apply {
                 action = SnifferVpnService.ACTION_START
-                putExtra(SnifferVpnService.EXTRA_TARGET_PACKAGE, packageName)
                 putExtra(
                     SnifferVpnService.EXTRA_ENABLE_HTTPS_MITM,
                     MitmCertificateAuthority(context).isInstalledInAndroidCaStore(),
                 )
             }
         )
-        context.packageManager.getLaunchIntentForPackage(packageName)?.let { launch ->
-            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(launch)
-        }
     }
 
     fun stopExternalCapture() {
         val context = getApplication<Application>()
-        SessionStore.stop()
+        SessionStore.stopExternal()
         context.startService(
             Intent(context, SnifferVpnService::class.java).apply {
                 action = SnifferVpnService.ACTION_STOP
