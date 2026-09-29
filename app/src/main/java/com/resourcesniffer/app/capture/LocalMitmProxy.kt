@@ -1,6 +1,7 @@
 package com.resourcesniffer.app.capture
 
 import android.net.VpnService
+import java.io.File
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.InputStream
@@ -77,7 +78,12 @@ class LocalMitmProxy(
             if (!vpnService.protect(upstream)) return
             upstream.tcpNoDelay = true
             upstream.connect(InetSocketAddress(dstIp, port), 12_000)
-            val inspector = HttpResourceStreamInspector(sourcePackage, sourceName, secure = false)
+            val inspector = HttpResourceStreamInspector(
+                sourcePackage,
+                sourceName,
+                secure = false,
+                responseCacheDir = File(vpnService.filesDir, "captured-responses"),
+            )
             relay(
                 clientInput, BufferedOutputStream(client.getOutputStream()),
                 BufferedInputStream(upstream.getInputStream()), BufferedOutputStream(upstream.getOutputStream()),
@@ -127,7 +133,12 @@ class LocalMitmProxy(
                 throw error
             }
             upstreamTls.startHandshake()
-            val inspector = HttpResourceStreamInspector(sourcePackage, sourceName, secure = true)
+            val inspector = HttpResourceStreamInspector(
+                sourcePackage,
+                sourceName,
+                secure = true,
+                responseCacheDir = File(vpnService.filesDir, "captured-responses"),
+            )
             relay(
                 BufferedInputStream(clientTls.inputStream), BufferedOutputStream(clientTls.outputStream),
                 BufferedInputStream(upstreamTls.inputStream), BufferedOutputStream(upstreamTls.outputStream),
