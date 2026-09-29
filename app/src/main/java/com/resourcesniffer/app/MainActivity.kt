@@ -113,6 +113,20 @@ class MainActivity : ComponentActivity() {
 
 private enum class MainMode { BROWSER, EXTERNAL, RESOURCES, DOWNLOADS }
 
+private enum class UiResourceCategory(val label: String) {
+    IMAGE("圖片"),
+    VIDEO("影片"),
+    DOCUMENT("文件"),
+    OTHER("其他"),
+}
+
+private fun Resource.uiCategory(): UiResourceCategory = when (type) {
+    ResourceType.IMAGE -> UiResourceCategory.IMAGE
+    ResourceType.VIDEO, ResourceType.STREAM -> UiResourceCategory.VIDEO
+    ResourceType.DOCUMENT -> UiResourceCategory.DOCUMENT
+    ResourceType.AUDIO, ResourceType.ARCHIVE, ResourceType.OTHER -> UiResourceCategory.OTHER
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -706,10 +720,10 @@ private fun BrowserPane(
         if (currentSessionId == null) emptyList()
         else resources.filter { it.sessionId == currentSessionId }
     }
-    val imageCount = liveResources.count { it.type == ResourceType.IMAGE }
-    val videoCount = liveResources.count {
-        it.type == ResourceType.VIDEO || it.type == ResourceType.STREAM
-    }
+    val imageCount = liveResources.count { it.uiCategory() == UiResourceCategory.IMAGE }
+    val videoCount = liveResources.count { it.uiCategory() == UiResourceCategory.VIDEO }
+    val documentCount = liveResources.count { it.uiCategory() == UiResourceCategory.DOCUMENT }
+    val otherCount = liveResources.count { it.uiCategory() == UiResourceCategory.OTHER }
 
     Column(
         Modifier.fillMaxSize(),
@@ -732,6 +746,8 @@ private fun BrowserPane(
                 )
                 AssistChip(onClick = {}, label = { Text("圖片 $imageCount") })
                 AssistChip(onClick = {}, label = { Text("影片 $videoCount") })
+                AssistChip(onClick = {}, label = { Text("文件 $documentCount") })
+                AssistChip(onClick = {}, label = { Text("其他 $otherCount") })
                 TextButton(onClick = onOpenResources) { Text("查看") }
             }
         }
@@ -1097,16 +1113,16 @@ private fun ResourcePane(
     onEnableOverlay: () -> Unit,
 ) {
     val context = LocalContext.current
-    var selectedType by remember { mutableStateOf<ResourceType?>(null) }
+    var selectedCategory by remember { mutableStateOf<UiResourceCategory?>(null) }
     var query by remember { mutableStateOf("") }
     var currentOnly by remember { mutableStateOf(true) }
     var selectionMode by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
 
-    val visible = remember(resources, selectedType, query, currentOnly, currentSessionId) {
+    val visible = remember(resources, selectedCategory, query, currentOnly, currentSessionId) {
         resources.filter { resource ->
             (!currentOnly || (currentSessionId != null && resource.sessionId == currentSessionId)) &&
-                (selectedType == null || resource.type == selectedType) &&
+                (selectedCategory == null || resource.uiCategory() == selectedCategory) &&
                 (query.isBlank() ||
                     resource.url.orEmpty().contains(query, true) ||
                     resource.host.contains(query, true))
@@ -1180,16 +1196,14 @@ private fun ResourcePane(
         ) {
             listOf(
                 null to "全部",
-                ResourceType.IMAGE to "圖片",
-                ResourceType.VIDEO to "影片",
-                ResourceType.AUDIO to "音訊",
-                ResourceType.STREAM to "串流",
-                ResourceType.DOCUMENT to "文件",
-                ResourceType.ARCHIVE to "壓縮檔",
-            ).forEach { (type, label) ->
+                UiResourceCategory.IMAGE to "圖片",
+                UiResourceCategory.VIDEO to "影片",
+                UiResourceCategory.DOCUMENT to "文件",
+                UiResourceCategory.OTHER to "其他",
+            ).forEach { (category, label) ->
                 FilterChip(
-                    selected = selectedType == type,
-                    onClick = { selectedType = type },
+                    selected = selectedCategory == category,
+                    onClick = { selectedCategory = category },
                     label = { Text(label) },
                 )
             }
@@ -1331,7 +1345,7 @@ private fun ResourceRow(
 
                 AssistChip(
                     onClick = { showDetails = true },
-                    label = { Text(resourceTypeLabel(resource.type)) },
+                    label = { Text(resource.uiCategory().label) },
                 )
             }
 
