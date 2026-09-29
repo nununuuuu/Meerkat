@@ -41,7 +41,7 @@ class OverlayService : Service() {
 
     private val updateCount = object : Runnable {
         override fun run() {
-            val sessionId = SessionStore.idOrDefault()
+            val sessionId = SessionStore.externalIdOrDefault()
             val items = if (sessionId == 0L) {
                 emptyList()
             } else {
@@ -94,7 +94,7 @@ class OverlayService : Service() {
         val density = resources.displayMetrics.density
         val size = (58 * density).toInt()
         val view = TextView(this).apply {
-            text = SessionStore.idOrDefault().let { sessionId ->
+            text = SessionStore.externalIdOrDefault().let { sessionId ->
                 if (sessionId == 0L) 0
                 else SnifferRepository.resources.value.count { it.sessionId == sessionId }
             }.toString()
@@ -182,7 +182,7 @@ class OverlayService : Service() {
             tag = "summary"
             text = buildSummary(
                 SnifferRepository.resources.value.filter {
-                    val sessionId = SessionStore.idOrDefault()
+                    val sessionId = SessionStore.externalIdOrDefault()
                     sessionId == 0L || it.sessionId == sessionId
                 }
             )
@@ -206,7 +206,7 @@ class OverlayService : Service() {
             text = "清空目前資源"
             setTextColor(0xFFE0E4E1.toInt())
             backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF354C43.toInt())
-            setOnClickListener { SnifferRepository.clearSession(SessionStore.idOrDefault()) }
+            setOnClickListener { SnifferRepository.clearSession(SessionStore.externalIdOrDefault()) }
         }
         val stop = Button(this).apply {
             text = "關閉懸浮球"
