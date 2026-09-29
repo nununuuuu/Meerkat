@@ -1049,7 +1049,7 @@ private fun ResourcePane(
 
     val visible = remember(resources, selectedType, query, currentOnly, currentSessionId) {
         resources.filter { resource ->
-            (!currentOnly || currentSessionId == null || resource.sessionId == currentSessionId) &&
+            (!currentOnly || (currentSessionId != null && resource.sessionId == currentSessionId)) &&
                 (selectedType == null || resource.type == selectedType) &&
                 (query.isBlank() ||
                     resource.url.orEmpty().contains(query, true) ||
