@@ -19,8 +19,11 @@ object ResourceClassifier {
 
     data class Classification(val type: ResourceType, val streamType: StreamType? = null)
 
+    fun normalizeMime(mimeType: String?): String =
+        mimeType?.lowercase()?.substringBefore(';')?.trim().orEmpty()
+
     fun classify(url: String?, mimeType: String?): Classification {
-        val mime = mimeType?.lowercase()?.substringBefore(';')?.trim().orEmpty()
+        val mime = normalizeMime(mimeType)
         val ext = extensionFromUrl(url)
 
         if (mime in setOf("application/vnd.apple.mpegurl", "application/x-mpegurl") || ext == "m3u8") {
