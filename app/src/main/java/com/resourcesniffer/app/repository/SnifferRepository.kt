@@ -105,6 +105,7 @@ object SnifferRepository {
 
     @Synchronized
     fun clear() {
+        deleteLocalFiles(_resources.value)
         _resources.value = emptyList()
         _preferredResources.value = emptyList()
         appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -114,10 +115,21 @@ object SnifferRepository {
     @Synchronized
     fun clearSession(sessionId: Long) {
         if (sessionId == 0L) return
+        val removed = _resources.value.filter { it.sessionId == sessionId }
         val kept = _resources.value.filterNot { it.sessionId == sessionId }
+        deleteLocalFiles(removed)
         _resources.value = kept
         recomputePreferred(kept)
         persistHistory(kept)
+    }
+
+    private fun deleteLocalFiles(resources: List<Resource>) {
+        resources.asSequence()
+            .mapNotNull { it.localCachePath }
+            .distinct()
+            .forEach { path ->
+                runCatching { java.io.File(path).delete() }
+            }
     }
 
     private fun qualityScore(resource: Resource): Long {
