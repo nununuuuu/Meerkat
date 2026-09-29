@@ -70,6 +70,16 @@ object SnifferRepository {
                 durationMs = maxOfNullable(old.durationMs, resource.durationMs),
                 videoCodec = preferred.videoCodec ?: secondary.videoCodec,
                 audioCodec = preferred.audioCodec ?: secondary.audioCodec,
+                variantCount = maxOfNullable(old.variantCount, resource.variantCount),
+                audioTrackCount = maxOfNullable(old.audioTrackCount, resource.audioTrackCount),
+                subtitleTrackCount = maxOfNullable(old.subtitleTrackCount, resource.subtitleTrackCount),
+                maxBandwidth = maxOfNullable(old.maxBandwidth, resource.maxBandwidth),
+                isLive = resource.isLive ?: old.isLive,
+                drmDetected = when {
+                    resource.drmDetected == true || old.drmDetected == true -> true
+                    resource.drmDetected == false || old.drmDetected == false -> false
+                    else -> null
+                },
                 finalUrl = resource.finalUrl ?: old.finalUrl,
                 etag = resource.etag ?: old.etag,
                 mediaGroupKey = resource.mediaGroupKey ?: old.mediaGroupKey ?: MediaIdentity.groupKey(resource.finalUrl ?: resource.url),
@@ -168,6 +178,12 @@ object SnifferRepository {
                     put("durationMs", resource.durationMs)
                     put("videoCodec", resource.videoCodec)
                     put("audioCodec", resource.audioCodec)
+                    put("variantCount", resource.variantCount)
+                    put("audioTrackCount", resource.audioTrackCount)
+                    put("subtitleTrackCount", resource.subtitleTrackCount)
+                    put("maxBandwidth", resource.maxBandwidth)
+                    put("isLive", resource.isLive)
+                    put("drmDetected", resource.drmDetected)
                     put("finalUrl", resource.finalUrl)
                     put("etag", resource.etag)
                     put("mediaGroupKey", resource.mediaGroupKey)
@@ -214,6 +230,12 @@ object SnifferRepository {
                             durationMs = if (item.isNull("durationMs")) null else item.optLong("durationMs"),
                             videoCodec = item.optString("videoCodec").takeIf { it.isNotBlank() && it != "null" },
                             audioCodec = item.optString("audioCodec").takeIf { it.isNotBlank() && it != "null" },
+                            variantCount = if (item.isNull("variantCount")) null else item.optInt("variantCount"),
+                            audioTrackCount = if (item.isNull("audioTrackCount")) null else item.optInt("audioTrackCount"),
+                            subtitleTrackCount = if (item.isNull("subtitleTrackCount")) null else item.optInt("subtitleTrackCount"),
+                            maxBandwidth = if (item.isNull("maxBandwidth")) null else item.optLong("maxBandwidth"),
+                            isLive = if (item.isNull("isLive")) null else item.optBoolean("isLive"),
+                            drmDetected = if (item.isNull("drmDetected")) null else item.optBoolean("drmDetected"),
                             finalUrl = item.optString("finalUrl").takeIf { it.isNotBlank() && it != "null" },
                             etag = item.optString("etag").takeIf { it.isNotBlank() && it != "null" },
                             mediaGroupKey = item.optString("mediaGroupKey").takeIf { it.isNotBlank() && it != "null" },
