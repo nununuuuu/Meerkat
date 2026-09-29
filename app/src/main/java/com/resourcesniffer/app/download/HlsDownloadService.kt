@@ -5,6 +5,9 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.ContentValues
 import android.content.Intent
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaMuxer
 import android.os.Build
 import android.os.Environment
 import android.os.IBinder
@@ -12,6 +15,7 @@ import android.net.Uri
 import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
 import java.io.File
+import java.io.FileOutputStream
 import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URI
@@ -112,60 +116,77 @@ class HlsDownloadService : Service() {
         recordId: String?,
         quality: DownloadQuality,
     ): String {
-        var playlistUrl = initialUrl
-        var manifest = fetchText(playlistUrl, headers)
+        val rootManifest = fetchText(initialUrl, headers)
+        val selection = chooseSelection(rootManifest, initialUrl, quality)
 
-        val masterVariant = chooseVariant(manifest, playlistUrl, quality)
-        if (masterVariant != null) {
-            playlistUrl = masterVariant
-            manifest = fetchText(playlistUrl, headers)
+        val videoPlaylistUrl = selection?.variant?.url ?: initialUrl
+        val videoManifest = if (videoPlaylistUrl == initialUrl) rootManifest else fetchText(videoPlaylistUrl, headers)
+        val videoPlaylist = parseMediaPlaylist(videoManifest, videoPlaylistUrl)
+        require(videoPlaylist.segments.isNotEmpty()) { "找不到可下載的 HLS 視訊分段" }
+
+        val audioUrl = selection?.audio?.uri
+        if (audioUrl.isNullOrBlank()) {
+            return writeSinglePlaylist(videoPlaylist, headers, recordId)
         }
 
-        val parsed = parseMediaPlaylist(manifest, playlistUrl)
-        require(parsed.segments.isNotEmpty()) { "找不到可下載的 HLS 分段" }
+        val audioManifest = fetchText(audioUrl, headers)
+        val audioPlaylist = parseMediaPlaylist(audioManifest, audioUrl)
+        require(audioPlaylist.segments.isNotEmpty()) { "找不到可下載的 HLS 音訊分段" }
 
-        val extension = if (parsed.segments.any { it.init != null || it.url.contains(".m4s", true) }) "mp4" else "ts"
-        val outputName = "Meerkat-${System.currentTimeMillis()}.$extension"
+        val stamp = recordId ?: System.currentTimeMillis().toString()
+        val videoTemp = File(cacheDir, "hls-" + stamp + "-video.bin")
+        val audioTemp = File(cacheDir, "hls-" + stamp + "-audio.bin")
+        val muxed = File(cacheDir, "hls-" + stamp + "-muxed.mp4")
 
+        try {
+            val total = videoPlaylist.segments.size + audioPlaylist.segments.size
+            var done = 0
+            writePlaylistToFile(videoPlaylist, headers, videoTemp, recordId) {
+                done++
+                updateCombinedProgress(recordId, done, total)
+            }
+            writePlaylistToFile(audioPlaylist, headers, audioTemp, recordId) {
+                done++
+                updateCombinedProgress(recordId, done, total)
+            }
+
+            ensureNotCancelled(recordId)
+            muxTracks(videoTemp, audioTemp, muxed)
+            return copyFileToDownloads(
+                muxed,
+                "Meerkat-" + System.currentTimeMillis() + ".mp4",
+                "video/mp4",
+            )
+        } finally {
+            videoTemp.delete()
+            audioTemp.delete()
+            muxed.delete()
+        }
+    }
+
+    private fun writeSinglePlaylist(
+        playlist: Playlist,
+        headers: Map<String, String>,
+        recordId: String?,
+    ): String {
+        val extension = if (playlist.segments.any { it.init != null || it.url.contains(".m4s", true) }) "mp4" else "ts"
+        val outputName = "Meerkat-" + System.currentTimeMillis() + "." + extension
         val target = openOutput(outputName)
         try {
             target.stream.use { output ->
-                var lastInit: RangedResource? = null
-
-            parsed.segments.forEachIndexed { index, segment ->
-                if (recordId != null && DownloadRegistry.find(recordId)?.state == DownloadState.CANCELLED) {
-                    error("下載已取消")
-                }
-                segment.init?.let { init ->
-                    if (init != lastInit) {
-                        output.write(fetchBytes(init.url, headers, init.range))
-                        lastInit = init
-                    }
-                }
-
-                var bytes = fetchBytes(segment.url, headers, segment.range)
-                val key = segment.key
-                if (key != null && key.method.equals("AES-128", true)) {
-                    val keyBytes = fetchBytes(key.uri, headers)
-                    require(keyBytes.size >= 16) { "HLS 金鑰長度無效" }
-                    val iv = key.iv ?: sequenceIv(segment.sequence)
-                    bytes = decryptAes128(bytes, keyBytes.copyOf(16), iv)
-                }
-                output.write(bytes)
-                if (index % 5 == 0 || index == parsed.segments.lastIndex) {
-                    updateProgress(index + 1, parsed.segments.size)
-                    if (recordId != null) {
-                        val progress = ((index + 1) * 100 / parsed.segments.size).coerceIn(0, 100)
-                        DownloadRegistry.update(recordId) { old ->
+                writePlaylist(playlist, headers, output, recordId) { done, total ->
+                    updateProgress(done, total)
+                    recordId?.let { id ->
+                        val progress = (done * 100 / total.coerceAtLeast(1)).coerceIn(0, 100)
+                        DownloadRegistry.update(id) { old ->
                             old.copy(
                                 state = DownloadState.DOWNLOADING,
                                 progress = progress,
-                                detail = "${index + 1} / ${parsed.segments.size} 分段",
+                                detail = done.toString() + " / " + total + " 分段",
                             )
                         }
                     }
                 }
-            }
                 output.flush()
             }
             publishOutput(target.uri)
@@ -174,6 +195,55 @@ class HlsDownloadService : Service() {
             runCatching { target.stream.close() }
             runCatching { contentResolver.delete(target.uri, null, null) }
             throw error
+        }
+    }
+
+    private fun writePlaylistToFile(
+        playlist: Playlist,
+        headers: Map<String, String>,
+        file: File,
+        recordId: String?,
+        onSegment: () -> Unit,
+    ) {
+        FileOutputStream(file).use { output ->
+            writePlaylist(playlist, headers, output, recordId) { _, _ -> onSegment() }
+        }
+    }
+
+    private fun writePlaylist(
+        playlist: Playlist,
+        headers: Map<String, String>,
+        output: OutputStream,
+        recordId: String?,
+        onProgress: (Int, Int) -> Unit,
+    ) {
+        var lastInit: RangedResource? = null
+        playlist.segments.forEachIndexed { index, segment ->
+            ensureNotCancelled(recordId)
+            segment.init?.let { init ->
+                if (init != lastInit) {
+                    output.write(fetchBytes(init.url, headers, init.range))
+                    lastInit = init
+                }
+            }
+
+            var bytes = fetchBytes(segment.url, headers, segment.range)
+            val key = segment.key
+            if (key != null && key.method.equals("AES-128", true)) {
+                val keyBytes = fetchBytes(key.uri, headers)
+                require(keyBytes.size >= 16) { "HLS 金鑰長度無效" }
+                val iv = key.iv ?: sequenceIv(segment.sequence)
+                bytes = decryptAes128(bytes, keyBytes.copyOf(16), iv)
+            }
+            output.write(bytes)
+            onProgress(index + 1, playlist.segments.size)
+        }
+        output.flush()
+    }
+
+    private fun ensureNotCancelled(recordId: String?) {
+        if (recordId != null && DownloadRegistry.find(recordId)?.state == DownloadState.CANCELLED) {
+            error("下載已取消")
         }
     }
 
@@ -199,11 +269,17 @@ class HlsDownloadService : Service() {
         val media: List<MasterMedia>,
     )
 
-    private fun chooseVariant(
+    private data class MasterSelection(
+        val variant: MasterVariant,
+        val audio: MasterMedia?,
+        val subtitle: MasterMedia?,
+    )
+
+    private fun chooseSelection(
         manifest: String,
         baseUrl: String,
         quality: DownloadQuality,
-    ): String? {
+    ): MasterSelection? {
         val master = parseMasterPlaylist(manifest, baseUrl)
         val comparator = compareBy<MasterVariant> {
             it.resolution
@@ -211,11 +287,27 @@ class HlsDownloadService : Service() {
                 ?.toIntOrNull()
                 ?: 0
         }.thenBy { it.bandwidth }
+
         val selected = when (quality) {
             DownloadQuality.HIGH -> master.variants.maxWithOrNull(comparator)
             DownloadQuality.LOW -> master.variants.minWithOrNull(comparator)
+        } ?: return null
+
+        fun chooseMedia(type: String, groupId: String?): MasterMedia? {
+            if (groupId.isNullOrBlank()) return null
+            val candidates = master.media.filter {
+                it.type.equals(type, true) &&
+                    it.groupId == groupId &&
+                    !it.uri.isNullOrBlank()
+            }
+            return candidates.firstOrNull { it.default } ?: candidates.firstOrNull()
         }
-        return selected?.url
+
+        return MasterSelection(
+            variant = selected,
+            audio = chooseMedia("AUDIO", selected.audioGroup),
+            subtitle = chooseMedia("SUBTITLES", selected.subtitleGroup),
+        )
     }
 
     private fun parseMasterPlaylist(manifest: String, baseUrl: String): MasterPlaylist {
@@ -434,6 +526,98 @@ class HlsDownloadService : Service() {
             put(MediaStore.Downloads.IS_PENDING, 0)
         }
         contentResolver.update(uri, values, null, null)
+    }
+
+    private fun muxTracks(videoFile: File, audioFile: File, outputFile: File) {
+        val videoExtractor = MediaExtractor().apply { setDataSource(videoFile.absolutePath) }
+        val audioExtractor = MediaExtractor().apply { setDataSource(audioFile.absolutePath) }
+        val muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+
+        try {
+            var videoTrack = -1
+            var audioTrack = -1
+            var videoMuxTrack = -1
+            var audioMuxTrack = -1
+
+            for (i in 0 until videoExtractor.trackCount) {
+                val format = videoExtractor.getTrackFormat(i)
+                val mime = format.getString("mime").orEmpty()
+                if (mime.startsWith("video/")) {
+                    videoTrack = i
+                    videoMuxTrack = muxer.addTrack(format)
+                    break
+                }
+            }
+            for (i in 0 until audioExtractor.trackCount) {
+                val format = audioExtractor.getTrackFormat(i)
+                val mime = format.getString("mime").orEmpty()
+                if (mime.startsWith("audio/")) {
+                    audioTrack = i
+                    audioMuxTrack = muxer.addTrack(format)
+                    break
+                }
+            }
+
+            require(videoTrack >= 0) { "HLS 視訊軌解析失敗" }
+            require(audioTrack >= 0) { "HLS 外掛音訊軌解析失敗" }
+
+            videoExtractor.selectTrack(videoTrack)
+            audioExtractor.selectTrack(audioTrack)
+            muxer.start()
+
+            fun copyTrack(extractor: MediaExtractor, muxTrack: Int) {
+                val buffer = ByteBuffer.allocate(2 * 1024 * 1024)
+                val info = MediaCodec.BufferInfo()
+                while (true) {
+                    buffer.clear()
+                    val size = extractor.readSampleData(buffer, 0)
+                    if (size < 0) break
+                    info.offset = 0
+                    info.size = size
+                    info.presentationTimeUs = extractor.sampleTime
+                    info.flags = extractor.sampleFlags
+                    muxer.writeSampleData(muxTrack, buffer, info)
+                    extractor.advance()
+                }
+            }
+
+            copyTrack(videoExtractor, videoMuxTrack)
+            copyTrack(audioExtractor, audioMuxTrack)
+        } finally {
+            runCatching { muxer.stop() }
+            muxer.release()
+            videoExtractor.release()
+            audioExtractor.release()
+        }
+    }
+
+    private fun copyFileToDownloads(file: File, displayName: String, mimeType: String): String {
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+            put(MediaStore.Downloads.MIME_TYPE, mimeType)
+            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Meerkat")
+        }
+        val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: error("無法建立下載檔案")
+        contentResolver.openOutputStream(uri)?.use { output ->
+            file.inputStream().use { input -> input.copyTo(output) }
+        } ?: error("無法寫入下載檔案")
+        return uri.toString()
+    }
+
+    private fun updateCombinedProgress(recordId: String?, done: Int, total: Int) {
+        val safeTotal = total.coerceAtLeast(1)
+        val progress = (done * 100 / safeTotal).coerceIn(0, 100)
+        recordId?.let { id ->
+            DownloadRegistry.update(id) { old ->
+                old.copy(
+                    state = DownloadState.DOWNLOADING,
+                    progress = progress,
+                    detail = done.toString() + " / " + safeTotal + " 分段（影音）",
+                )
+            }
+        }
+        updateProgress(done, safeTotal)
     }
 
     private fun updateProgress(done: Int, total: Int) {
