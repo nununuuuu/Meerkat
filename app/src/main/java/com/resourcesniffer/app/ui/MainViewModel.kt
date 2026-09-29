@@ -67,6 +67,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun recordLocalResource(
+        sourceUrl: String,
+        localCachePath: String,
+        mimeType: String?,
+        contentLength: Long,
+        fileName: String? = null,
+        referer: String? = null,
+    ) {
+        val classificationUrl = if (!fileName.isNullOrBlank()) {
+            sourceUrl + (if (sourceUrl.contains("?")) "&" else "?") + "filename=" + Uri.encode(fileName)
+        } else sourceUrl
+        val classification = ResourceClassifier.classify(classificationUrl, mimeType)
+        if (classification.type == ResourceType.OTHER) return
+
+        val session = SessionStore.ensureBrowserSession()
+        val host = runCatching { Uri.parse(referer).host }.getOrNull() ?: "blob"
+        SnifferRepository.add(
+            Resource(
+                id = ids.getAndIncrement(),
+                sessionId = session.id,
+                sourceAppPackage = null,
+                sourceAppName = "內建瀏覽器",
+                url = sourceUrl,
+                host = host,
+                mimeType = mimeType,
+                extension = ResourceClassifier.extensionFromUrl(classificationUrl).ifBlank { null },
+                fileName = fileName,
+                localCachePath = localCachePath,
+                contentLength = contentLength,
+                type = classification.type,
+                streamType = classification.streamType,
+                referer = referer,
+                mediaGroupKey = "local:" + localCachePath,
+            )
+        )
+    }
     fun installedApps(): List<InstalledApp> {
         val context = getApplication<Application>()
         val pm = context.packageManager
