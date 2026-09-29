@@ -3,6 +3,7 @@ package com.resourcesniffer.app.core
 import android.net.Uri
 
 object ResourceClassifier {
+    // Universal downloadable resource classification.
     private val imageExt = setOf("jpg", "jpeg", "png", "webp", "gif", "avif", "bmp", "svg", "heic", "heif")
     private val videoExt = setOf("mp4", "webm", "mkv", "mov", "m4v", "avi", "ts", "m2ts")
     private val audioExt = setOf("mp3", "m4a", "aac", "ogg", "opus", "flac", "wav")
