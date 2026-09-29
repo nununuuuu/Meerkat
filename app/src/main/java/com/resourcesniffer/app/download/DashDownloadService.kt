@@ -28,6 +28,9 @@ class DashDownloadService : Service() {
     companion object {
         private const val CHANNEL_ID = "dash_download"
         private const val NOTIFICATION_ID = 2201
+        private const val LIVE_MAX_RECORD_MS = 6L * 60L * 60L * 1000L
+        private const val LIVE_MIN_REFRESH_MS = 1_000L
+        private const val LIVE_MAX_REFRESH_MS = 10_000L
         const val EXTRA_RECORD_ID = "record_id"
         const val EXTRA_URL = "url"
         const val EXTRA_COOKIE = "cookie"
@@ -231,6 +234,8 @@ class DashDownloadService : Service() {
     private data class Manifest(
         val durationSeconds: Double?,
         val representations: List<Representation>,
+        val dynamic: Boolean,
+        val minimumUpdatePeriodSeconds: Double?,
     )
 
     private fun downloadDash(
@@ -245,6 +250,15 @@ class DashDownloadService : Service() {
         }
 
         val manifest = parseMpd(xml, mpdUrl)
+        if (manifest.dynamic) {
+            return downloadDynamicDash(
+                mpdUrl = mpdUrl,
+                initialManifest = manifest,
+                headers = headers,
+                recordId = recordId,
+                quality = quality,
+            )
+        }
         val selectedByPeriod = selectRepresentationsByPeriod(manifest, quality)
         require(selectedByPeriod.isNotEmpty()) { "找不到可下載的 DASH 軌道" }
 
@@ -360,11 +374,171 @@ class DashDownloadService : Service() {
         }
     }
 
+    private data class DynamicTrackState(
+        val kind: TrackKind,
+        val periodIndex: Int,
+        val file: File,
+        val seen: LinkedHashSet<String> = linkedSetOf(),
+        var initUrl: String? = null,
+        var segmentCount: Int = 0,
+    )
+
+    private fun downloadDynamicDash(
+        mpdUrl: String,
+        initialManifest: Manifest,
+        headers: Map<String, String>,
+        recordId: String?,
+        quality: DownloadQuality,
+    ): String {
+        val stamp = recordId ?: System.currentTimeMillis().toString()
+        val states = linkedMapOf<Pair<Int, TrackKind>, DynamicTrackState>()
+        val allFiles = mutableListOf<File>()
+        var manifest = initialManifest
+        val startedAt = System.currentTimeMillis()
+
+        fun stateFor(rep: Representation): DynamicTrackState {
+            val key = rep.periodIndex to rep.kind
+            return states.getOrPut(key) {
+                val file = File(
+                    cacheDir,
+                    "dash-live-" + stamp + "-p" + rep.periodIndex + "-" +
+                        rep.kind.name.lowercase() + ".bin",
+                )
+                allFiles += file
+                DynamicTrackState(rep.kind, rep.periodIndex, file)
+            }
+        }
+
+        try {
+            while (true) {
+                val selected = selectRepresentationsByPeriod(manifest, quality)
+                require(selected.isNotEmpty()) { "Live DASH 暫時沒有可下載軌道" }
+
+                selected.toSortedMap().forEach { (_, reps) ->
+                    reps.filter { it.kind != TrackKind.TEXT }.forEach { rep ->
+                        ensureNotCancelled(recordId)
+                        val state = stateFor(rep)
+                        FileOutputStream(state.file, state.file.exists() && state.file.length() > 0L).use { output ->
+                            rep.initializationUrl()?.let { init ->
+                                if (state.initUrl != init && state.seen.add("init|" + init)) {
+                                    output.write(fetchBytes(init, headers))
+                                    state.initUrl = init
+                                }
+                            }
+                            rep.segmentUrls().forEach { url ->
+                                if (!state.seen.add(url)) return@forEach
+                                output.write(fetchBytes(url, headers))
+                                state.segmentCount++
+                            }
+                            output.fd.sync()
+                        }
+                    }
+                }
+
+                val videoCount = states.values.filter { it.kind == TrackKind.VIDEO }.sumOf { it.segmentCount }
+                val audioCount = states.values.filter { it.kind == TrackKind.AUDIO }.sumOf { it.segmentCount }
+                recordId?.let { id ->
+                    DownloadRegistry.update(id) { old ->
+                        if (old.state == DownloadState.CANCELLED) old
+                        else old.copy(
+                            state = DownloadState.DOWNLOADING,
+                            progress = null,
+                            detail = "Live DASH 錄製中 · V " + videoCount + " / A " + audioCount + " 分段",
+                        )
+                    }
+                }
+                updateLiveDashNotification(videoCount, audioCount)
+
+                if (isCancelled(recordId)) break
+                if (System.currentTimeMillis() - startedAt >= LIVE_MAX_RECORD_MS) break
+
+                val refreshMs = ((manifest.minimumUpdatePeriodSeconds ?: 4.0) * 1000.0)
+                    .toLong()
+                    .coerceIn(LIVE_MIN_REFRESH_MS, LIVE_MAX_REFRESH_MS)
+                Thread.sleep(refreshMs)
+                if (isCancelled(recordId)) break
+
+                val xml = fetchText(mpdUrl, headers)
+                require(!xml.contains("urn:uuid:edef8ba9", true) && !xml.contains("cenc:pssh", true)) {
+                    "Live DASH 切換為 DRM/CENC，停止錄製"
+                }
+                manifest = parseMpd(xml, mpdUrl)
+                if (!manifest.dynamic) break
+            }
+
+            val periodPrimaryFiles = mutableListOf<File>()
+            states.keys.map { it.first }.distinct().sorted().forEach { periodIndex ->
+                val video = states[periodIndex to TrackKind.VIDEO]?.file?.takeIf { it.length() > 0L }
+                val audio = states[periodIndex to TrackKind.AUDIO]?.file?.takeIf { it.length() > 0L }
+                when {
+                    video != null && audio != null -> {
+                        val muxed = File(cacheDir, "dash-live-" + stamp + "-p" + periodIndex + "-muxed.mp4")
+                        muxMp4(video, audio, muxed)
+                        allFiles += muxed
+                        periodPrimaryFiles += muxed
+                    }
+                    video != null -> periodPrimaryFiles += video
+                    audio != null -> periodPrimaryFiles += audio
+                }
+            }
+
+            require(periodPrimaryFiles.isNotEmpty()) { "Live DASH 期間沒有取得可保存內容" }
+
+            if (periodPrimaryFiles.size == 1) {
+                return copyToDownloads(
+                    periodPrimaryFiles.first(),
+                    "Meerkat-live-" + System.currentTimeMillis() + ".mp4",
+                )
+            }
+
+            val combined = File(cacheDir, "dash-live-" + stamp + "-all-periods.mp4")
+            allFiles += combined
+            val merged = runCatching {
+                concatenateMp4Periods(periodPrimaryFiles, combined)
+                copyToDownloads(
+                    combined,
+                    "Meerkat-live-" + System.currentTimeMillis() + ".mp4",
+                )
+            }.getOrNull()
+            if (merged != null) return merged
+
+            var first: String? = null
+            periodPrimaryFiles.forEachIndexed { index, file ->
+                val uri = copyToDownloads(
+                    file,
+                    "Meerkat-live-" + System.currentTimeMillis() + "-part" + (index + 1) + ".mp4",
+                )
+                if (first == null) first = uri
+            }
+            return first ?: error("無法保存 Live DASH")
+        } finally {
+            allFiles.distinct().forEach { it.delete() }
+        }
+    }
+
+    private fun isCancelled(recordId: String?): Boolean =
+        recordId != null && DownloadRegistry.find(recordId)?.state == DownloadState.CANCELLED
+
+    private fun updateLiveDashNotification(videoSegments: Int, audioSegments: Int) {
+        getSystemService(NotificationManager::class.java).notify(
+            NOTIFICATION_ID,
+            NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentTitle("正在錄製 Live DASH")
+                .setContentText("V " + videoSegments + " / A " + audioSegments + " 分段")
+                .setProgress(0, 0, true)
+                .setOngoing(true)
+                .build()
+        )
+    }
+
     private fun parseMpd(xml: String, mpdUrl: String): Manifest {
         val parser = Xml.newPullParser()
         parser.setInput(xml.reader())
 
         var mpdDuration: Double? = null
+        var dynamic = false
+        var minimumUpdatePeriodSeconds: Double? = null
         var periodDuration: Double? = null
         var periodIndex = -1
         var mpdBase = mpdUrl
@@ -385,7 +559,13 @@ class DashDownloadService : Service() {
         while (parser.eventType != XmlPullParser.END_DOCUMENT) {
             when (parser.eventType) {
                 XmlPullParser.START_TAG -> when (parser.name) {
-                    "MPD" -> mpdDuration = parseIsoDuration(parser.getAttributeValue(null, "mediaPresentationDuration"))
+                    "MPD" -> {
+                        mpdDuration = parseIsoDuration(parser.getAttributeValue(null, "mediaPresentationDuration"))
+                        dynamic = parser.getAttributeValue(null, "type").equals("dynamic", true)
+                        minimumUpdatePeriodSeconds = parseIsoDuration(
+                            parser.getAttributeValue(null, "minimumUpdatePeriod")
+                        )
+                    }
                     "Period" -> {
                         periodIndex++
                         periodDuration = parseIsoDuration(parser.getAttributeValue(null, "duration"))
@@ -548,7 +728,12 @@ class DashDownloadService : Service() {
             }
             parser.next()
         }
-        return Manifest(periodDuration ?: mpdDuration, reps)
+        return Manifest(
+            durationSeconds = periodDuration ?: mpdDuration,
+            representations = reps,
+            dynamic = dynamic,
+            minimumUpdatePeriodSeconds = minimumUpdatePeriodSeconds,
+        )
     }
 
     private fun selectRepresentationsByPeriod(
@@ -802,9 +987,7 @@ class DashDownloadService : Service() {
     }
 
     private fun ensureNotCancelled(recordId: String?) {
-        if (recordId != null && DownloadRegistry.find(recordId)?.state == DownloadState.CANCELLED) {
-            error("下載已取消")
-        }
+        if (isCancelled(recordId)) error("下載已取消")
     }
 
     private fun fetchText(url: String, headers: Map<String, String>): String =
