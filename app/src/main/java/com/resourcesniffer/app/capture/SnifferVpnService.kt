@@ -15,7 +15,6 @@ class SnifferVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.resourcesniffer.app.START_CAPTURE"
         const val ACTION_STOP = "com.resourcesniffer.app.STOP_CAPTURE"
-        const val EXTRA_TARGET_PACKAGE = "target_package"
         const val EXTRA_ENABLE_HTTPS_MITM = "enable_https_mitm"
         private const val CHANNEL_ID = "sniffer_vpn"
         private const val NOTIFICATION_ID = 1001
@@ -28,7 +27,6 @@ class SnifferVpnService : VpnService() {
         when (intent?.action) {
             ACTION_STOP -> stopCapture()
             else -> startCapture(
-                intent?.getStringExtra(EXTRA_TARGET_PACKAGE),
                 intent?.getBooleanExtra(EXTRA_ENABLE_HTTPS_MITM, false) == true,
             )
         }
@@ -36,11 +34,11 @@ class SnifferVpnService : VpnService() {
     }
 
     @Synchronized
-    private fun startCapture(targetPackage: String?, enableHttpsMitm: Boolean) {
+    private fun startCapture(enableHttpsMitm: Boolean) {
         if (forwarder != null) return
 
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification(targetPackage))
+        startForeground(NOTIFICATION_ID, buildNotification())
 
         val builder = Builder()
             .setSession("Meerkat 資源嗅探")
@@ -49,21 +47,10 @@ class SnifferVpnService : VpnService() {
             .addRoute("0.0.0.0", 0)
             .addDnsServer("1.1.1.1")
 
-        if (!targetPackage.isNullOrBlank()) {
-            val allowed = runCatching {
-                builder.addAllowedApplication(targetPackage)
-                true
-            }.getOrDefault(false)
-            if (!allowed) {
-                stopCapture()
-                return
-            }
-        } else {
-            // Avoid accidentally routing the whole device while this feature is
-            // intended for a user-selected target application.
-            stopCapture()
-            return
-        }
+        // Global mode: capture all device traffic except Meerkat itself.
+        // Proxy/upstream sockets are also protected individually, but excluding
+        // our own package avoids routing WebView/download traffic back into TUN.
+        runCatching { builder.addDisallowedApplication(packageName) }
 
         val pfd = builder.establish() ?: run {
             stopCapture()
@@ -71,17 +58,14 @@ class SnifferVpnService : VpnService() {
         }
 
         val fd = pfd.detachFd()
-        val targetName = runCatching {
-            val info = packageManager.getApplicationInfo(targetPackage, 0)
-            packageManager.getApplicationLabel(info).toString()
-        }.getOrNull()
+        val targetName = "全域 App 嗅探"
         val proxyPort = if (enableHttpsMitm) {
             val ca = MitmCertificateAuthority(this)
-            val proxy = LocalMitmProxy(this, targetPackage, targetName, ca)
+            val proxy = LocalMitmProxy(this, null, targetName, ca)
             localProxy = proxy
             proxy.start()
         } else null
-        val engine = NetstackForwarder(this, targetPackage, targetName, proxyPort)
+        val engine = NetstackForwarder(this, null, targetName, proxyPort)
         forwarder = engine
 
         try {
@@ -116,17 +100,10 @@ class SnifferVpnService : VpnService() {
         super.onDestroy()
     }
 
-    private fun buildNotification(targetPackage: String?) = NotificationCompat.Builder(this, CHANNEL_ID)
+    private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.stat_sys_download_done)
-        .setContentTitle("Meerkat 正在嗅探資源")
-        .setContentText(
-            targetPackage?.let { pkg ->
-                runCatching {
-                    val info = packageManager.getApplicationInfo(pkg, 0)
-                    packageManager.getApplicationLabel(info).toString()
-                }.getOrDefault(pkg)
-            } ?: "已啟用"
-        )
+        .setContentTitle("Meerkat 正在全域嗅探")
+        .setContentText("你可以離開 Meerkat，自行開啟任何 App")
         .setOngoing(true)
         .setContentIntent(
             PendingIntent.getActivity(
