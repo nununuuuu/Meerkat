@@ -107,7 +107,7 @@ class LocalMitmProxy(
         ) as SSLSocket
         clientTls.useClientMode = false
         clientTls.sslParameters = clientTls.sslParameters.apply {
-            applicationProtocols = arrayOf("h2", "http/1.1")
+            applicationProtocols = arrayOf("http/1.1")
         }
 
         val upstreamBase = Socket()
