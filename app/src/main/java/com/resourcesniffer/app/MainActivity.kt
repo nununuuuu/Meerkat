@@ -123,6 +123,7 @@ private fun MeerkatApp(
     var webView by remember { mutableStateOf<WebView?>(null) }
     var selectedPackage by remember { mutableStateOf<String?>(null) }
     var externalCaptureActive by remember { mutableStateOf(false) }
+    var mitmCaInstalled by remember { mutableStateOf(viewModel.isMitmCaInstalled()) }
 
     val apps = remember { viewModel.installedApps() }
 
@@ -137,6 +138,9 @@ private fun MeerkatApp(
     }
 
     val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    val caInstallLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        mitmCaInstalled = viewModel.isMitmCaInstalled()
+    }
 
     LaunchedEffect(incomingUrl) {
         if (!incomingUrl.isNullOrBlank()) {
@@ -177,6 +181,12 @@ private fun MeerkatApp(
                         onClick = { mode = MainMode.BROWSER },
                         icon = { Icon(Icons.Default.Public, null) },
                         label = { Text("瀏覽器") },
+                    )
+                    NavigationBarItem(
+                        selected = mode == MainMode.EXTERNAL,
+                        onClick = { mode = MainMode.EXTERNAL },
+                        icon = { Icon(Icons.Default.Security, null) },
+                        label = { Text("App") },
                     )
                     NavigationBarItem(
                         selected = mode == MainMode.RESOURCES,
@@ -237,6 +247,9 @@ private fun MeerkatApp(
                             viewModel.stopExternalCapture()
                             externalCaptureActive = false
                         },
+                        caInstalled = mitmCaInstalled,
+                        caFingerprint = viewModel.mitmCaFingerprint(),
+                        onInstallCa = { caInstallLauncher.launch(viewModel.mitmCaInstallIntent()) },
                     )
                     MainMode.RESOURCES -> ResourcePane(
                         resources = resources,
@@ -534,6 +547,9 @@ private fun ExternalAppPane(
     onSelected: (String) -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
+    caInstalled: Boolean,
+    caFingerprint: String,
+    onInstallCa: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
     val filtered = remember(query, apps) {
@@ -554,13 +570,21 @@ private fun ExternalAppPane(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Text("外部 App 相容嗅探", fontWeight = FontWeight.SemiBold)
+                Text("外部 App 深度嗅探", fontWeight = FontWeight.SemiBold)
                 Text(
-                    "這個模式會把你選定 App 的流量正常轉送；只有能看見完整 HTTP URL 的請求才能直接辨識成可下載資源。",
+                    if (caInstalled) "Meerkat CA 已安裝：HTTPS MITM 會自動啟用。" else "要解析 HTTPS 資源，先安裝 Meerkat Local CA。Android 會顯示系統憑證確認畫面。",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Text(
-                    "多數 App 使用 HTTPS，完整資源路徑位於 TLS 加密內，因此可能顯示 0。若 App 可分享文章/頁面網址，請分享至 Meerkat 後用內建瀏覽器抓取 HTTPS 資源。",
+                    "CA SHA-256：" + caFingerprint,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (!caInstalled) {
+                    OutlinedButton(onClick = onInstallCa) { Text("安裝 HTTPS CA") }
+                }
+                Text(
+                    "不信任使用者 CA 或使用 certificate pinning 的 App 可能無法解密；這種連線會保留為一般轉送，不代表已取得內容。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -577,7 +601,7 @@ private fun ExternalAppPane(
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onStart, enabled = !captureActive && selectedPackage != null) {
-                Text("啟動相容嗅探")
+                Text(if (caInstalled) "啟動 HTTPS 深度嗅探" else "啟動一般嗅探")
             }
             OutlinedButton(onClick = onStop, enabled = captureActive) {
                 Text("停止")
