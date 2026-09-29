@@ -9,6 +9,7 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.resourcesniffer.app.MainActivity
 import com.resourcesniffer.app.R
+import com.resourcesniffer.app.repository.SessionStore
 
 class SnifferVpnService : VpnService() {
 
@@ -37,6 +38,7 @@ class SnifferVpnService : VpnService() {
     private fun startCapture(enableHttpsMitm: Boolean) {
         if (forwarder != null) return
 
+        SessionStore.startExternal(targetPackage = null, targetName = "全域 App 嗅探")
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
 
@@ -82,6 +84,7 @@ class SnifferVpnService : VpnService() {
         runCatching { engine?.stop() }
         runCatching { localProxy?.stop() }
         localProxy = null
+        SessionStore.stopExternal()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
