@@ -10,6 +10,8 @@ import com.resourcesniffer.app.repository.SnifferRepository
 import com.resourcesniffer.app.repository.SessionStore
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.util.zip.GZIPInputStream
 import java.util.zip.InflaterInputStream
 import org.brotli.dec.BrotliInputStream
@@ -29,6 +31,7 @@ class HttpResourceStreamInspector(
     private val sourcePackage: String?,
     private val sourceName: String? = null,
     private val secure: Boolean = false,
+    private val responseCacheDir: File? = null,
 ) {
     private data class PendingRequest(
         val method: String,
@@ -38,6 +41,52 @@ class HttpResourceStreamInspector(
         val cookie: String?,
     )
 
+    private class PassThroughCapture(
+        val file: File,
+        private val output: FileOutputStream,
+        private val expectedLength: Long,
+    ) {
+        var written: Long = 0L
+            private set
+        private var valid = true
+
+        fun write(bytes: ByteArray) {
+            if (!valid) return
+            if (written + bytes.size > expectedLength) {
+                abort()
+                return
+            }
+            runCatching {
+                output.write(bytes)
+                written += bytes.size
+            }.onFailure { abort() }
+        }
+
+        fun finish(): File? {
+            if (!valid) return null
+            return runCatching {
+                output.flush()
+                output.fd.sync()
+                output.close()
+                if (written == expectedLength && written > 0L) file
+                else {
+                    file.delete()
+                    null
+                }
+            }.getOrElse {
+                abort()
+                null
+            }
+        }
+
+        fun abort() {
+            if (!valid) return
+            valid = false
+            runCatching { output.close() }
+            file.delete()
+        }
+    }
+
     private data class ResponseContext(
         val request: PendingRequest,
         val resource: Resource?,
@@ -45,6 +94,7 @@ class HttpResourceStreamInspector(
         val contentType: String?,
         val contentEncoding: String?,
         val body: ByteArrayOutputStream? = null,
+        val cache: PassThroughCapture? = null,
     )
 
     private enum class BodyMode { HEADER, FIXED, CHUNK_SIZE, CHUNK_DATA, CHUNK_CRLF, CHUNK_TRAILERS, UNTIL_CLOSE }
@@ -262,6 +312,13 @@ class HttpResourceStreamInspector(
                         contentType = mime,
                         contentEncoding = contentEncoding,
                         body = if (shouldInspectBody) ByteArrayOutputStream() else null,
+                        cache = createPassThroughCapture(
+                            request = request,
+                            resource = resource,
+                            statusCode = statusCode,
+                            contentLength = contentLength,
+                            contentEncoding = contentEncoding,
+                        ),
                     )
 
                     val noBody = request.method.equals("HEAD", true) ||
@@ -365,7 +422,10 @@ class HttpResourceStreamInspector(
     }
 
     private fun captureResponseBody(bytes: ByteArray) {
-        val out = responseContext?.body ?: return
+        val context = responseContext ?: return
+        context.cache?.write(bytes)
+
+        val out = context.body ?: return
         if (out.size() >= MAX_INSPECT_BODY_BYTES) return
         val writable = minOf(bytes.size, MAX_INSPECT_BODY_BYTES - out.size())
         out.write(bytes, 0, writable)
@@ -374,7 +434,16 @@ class HttpResourceStreamInspector(
     private fun finishResponse() {
         val context = responseContext
         responseContext = null
-        val resource = context?.resource ?: return
+        var resource = context?.resource ?: return
+
+        context.cache?.finish()?.let { cached ->
+            resource = resource.copy(
+                localCachePath = cached.absolutePath,
+                contentLength = resource.contentLength ?: cached.length(),
+            )
+            SnifferRepository.add(resource)
+        }
+
         val body = context.body?.toByteArray() ?: return
         if (body.isEmpty()) return
 
@@ -391,6 +460,57 @@ class HttpResourceStreamInspector(
         if (enriched != resource) SnifferRepository.add(enriched)
 
         deepSearch(context.request, text)
+    }
+
+    private fun createPassThroughCapture(
+        request: PendingRequest,
+        resource: Resource?,
+        statusCode: Int,
+        contentLength: Long?,
+        contentEncoding: String?,
+    ): PassThroughCapture? {
+        val target = resource ?: return null
+        val dir = responseCacheDir ?: return null
+        val length = contentLength ?: return null
+        if (request.method != "GET" || statusCode != 200) return null
+        if (length <= 0L || length > MAX_PASSTHROUGH_FILE_BYTES) return null
+        if (!contentEncoding.isNullOrBlank() && !contentEncoding.equals("identity", true)) return null
+        if (
+            target.type !in setOf(
+                ResourceType.IMAGE,
+                ResourceType.VIDEO,
+                ResourceType.AUDIO,
+                ResourceType.DOCUMENT,
+                ResourceType.ARCHIVE,
+            )
+        ) return null
+
+        return runCatching {
+            dir.mkdirs()
+            trimPassThroughCache(dir, length)
+            val file = File(dir, "response-" + target.id + ".capture")
+            PassThroughCapture(
+                file = file,
+                output = FileOutputStream(file, false),
+                expectedLength = length,
+            )
+        }.getOrNull()
+    }
+
+    private fun trimPassThroughCache(dir: File, incomingLength: Long) {
+        val files = dir.listFiles()
+            ?.filter { it.isFile }
+            ?.sortedBy { it.lastModified() }
+            ?.toMutableList()
+            ?: return
+        var total = files.sumOf { it.length() }
+
+        val iterator = files.iterator()
+        while (total + incomingLength > MAX_PASSTHROUGH_TOTAL_BYTES && iterator.hasNext()) {
+            val old = iterator.next()
+            val size = old.length()
+            if (old.delete()) total -= size
+        }
     }
 
     private fun decodeContent(bytes: ByteArray, encoding: String?): ByteArray? = runCatching {
@@ -853,6 +973,8 @@ class HttpResourceStreamInspector(
         private const val MAX_INSPECT_BODY_CHARS = 4 * 1024 * 1024
         private const val MAX_DEEP_SEARCH_RESULTS = 256
         private const val MAX_WEBSOCKET_PAYLOAD = 2L * 1024 * 1024
+        private const val MAX_PASSTHROUGH_FILE_BYTES = 64L * 1024 * 1024
+        private const val MAX_PASSTHROUGH_TOTAL_BYTES = 512L * 1024 * 1024
         private val HEADER_END = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
         private val CRLF = "\r\n".toByteArray(Charsets.US_ASCII)
         private val METHODS = setOf("GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "PATCH")
