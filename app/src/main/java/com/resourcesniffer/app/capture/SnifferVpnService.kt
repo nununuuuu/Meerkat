@@ -16,22 +16,27 @@ class SnifferVpnService : VpnService() {
         const val ACTION_START = "com.resourcesniffer.app.START_CAPTURE"
         const val ACTION_STOP = "com.resourcesniffer.app.STOP_CAPTURE"
         const val EXTRA_TARGET_PACKAGE = "target_package"
+        const val EXTRA_ENABLE_HTTPS_MITM = "enable_https_mitm"
         private const val CHANNEL_ID = "sniffer_vpn"
         private const val NOTIFICATION_ID = 1001
     }
 
     @Volatile private var forwarder: NetstackForwarder? = null
+    @Volatile private var localProxy: LocalMitmProxy? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> stopCapture()
-            else -> startCapture(intent?.getStringExtra(EXTRA_TARGET_PACKAGE))
+            else -> startCapture(
+                intent?.getStringExtra(EXTRA_TARGET_PACKAGE),
+                intent?.getBooleanExtra(EXTRA_ENABLE_HTTPS_MITM, false) == true,
+            )
         }
         return START_STICKY
     }
 
     @Synchronized
-    private fun startCapture(targetPackage: String?) {
+    private fun startCapture(targetPackage: String?, enableHttpsMitm: Boolean) {
         if (forwarder != null) return
 
         createNotificationChannel()
@@ -70,7 +75,13 @@ class SnifferVpnService : VpnService() {
             val info = packageManager.getApplicationInfo(targetPackage, 0)
             packageManager.getApplicationLabel(info).toString()
         }.getOrNull()
-        val engine = NetstackForwarder(this, targetPackage, targetName)
+        val proxyPort = if (enableHttpsMitm) {
+            val ca = MitmCertificateAuthority(this)
+            val proxy = LocalMitmProxy(this, targetPackage, targetName, ca)
+            localProxy = proxy
+            proxy.start()
+        } else null
+        val engine = NetstackForwarder(this, targetPackage, targetName, proxyPort)
         forwarder = engine
 
         try {
@@ -85,6 +96,8 @@ class SnifferVpnService : VpnService() {
         val engine = forwarder
         forwarder = null
         runCatching { engine?.stop() }
+        runCatching { localProxy?.stop() }
+        localProxy = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -98,6 +111,8 @@ class SnifferVpnService : VpnService() {
         val engine = forwarder
         forwarder = null
         runCatching { engine?.stop() }
+        runCatching { localProxy?.stop() }
+        localProxy = null
         super.onDestroy()
     }
 
