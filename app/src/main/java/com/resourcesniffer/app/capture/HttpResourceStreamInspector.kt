@@ -417,49 +417,116 @@ class HttpResourceStreamInspector(
         var maxWidth = resource.width
         var maxHeight = resource.height
         var durationSeconds = 0.0
+        var variantCount = 0
+        var audioTracks = 0
+        var subtitleTracks = 0
+        var maxBandwidth = resource.maxBandwidth ?: 0L
+        var drm = false
+        var sawMediaSegments = false
 
         manifest.lineSequence().forEach { raw ->
             val line = raw.trim()
-            if (line.startsWith("#EXT-X-STREAM-INF:", true)) {
-                val resolution = Regex("""RESOLUTION=(\d+)x(\d+)""", RegexOption.IGNORE_CASE)
-                    .find(line)
-                val width = resolution?.groupValues?.getOrNull(1)?.toIntOrNull()
-                val height = resolution?.groupValues?.getOrNull(2)?.toIntOrNull()
-                if (width != null && height != null) {
-                    if ((width.toLong() * height) > ((maxWidth ?: 0).toLong() * (maxHeight ?: 0))) {
+            when {
+                line.startsWith("#EXT-X-STREAM-INF:", true) -> {
+                    variantCount++
+                    val resolution = Regex("""RESOLUTION=(\d+)x(\d+)""", RegexOption.IGNORE_CASE)
+                        .find(line)
+                    val width = resolution?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    val height = resolution?.groupValues?.getOrNull(2)?.toIntOrNull()
+                    val bandwidth = Regex("""(?:^|,)\s*(?:AVERAGE-)?BANDWIDTH=(\d+)""", RegexOption.IGNORE_CASE)
+                        .find(line.substringAfter(':'))
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.toLongOrNull()
+                    if (bandwidth != null) maxBandwidth = maxOf(maxBandwidth, bandwidth)
+                    if (width != null && height != null &&
+                        (width.toLong() * height) > ((maxWidth ?: 0).toLong() * (maxHeight ?: 0))
+                    ) {
                         maxWidth = width
                         maxHeight = height
                     }
                 }
-            } else if (line.startsWith("#EXTINF:", true)) {
-                durationSeconds += line.substringAfter(':').substringBefore(',').toDoubleOrNull() ?: 0.0
+
+                line.startsWith("#EXT-X-MEDIA:", true) -> {
+                    val attrs = line.substringAfter(':')
+                    when {
+                        Regex("""(?:^|,)\s*TYPE=AUDIO(?:,|$)""", RegexOption.IGNORE_CASE).containsMatchIn(attrs) -> audioTracks++
+                        Regex("""(?:^|,)\s*TYPE=SUBTITLES(?:,|$)""", RegexOption.IGNORE_CASE).containsMatchIn(attrs) -> subtitleTracks++
+                    }
+                }
+
+                line.startsWith("#EXT-X-KEY:", true) -> {
+                    val method = Regex("""METHOD=([^,]+)""", RegexOption.IGNORE_CASE)
+                        .find(line)?.groupValues?.getOrNull(1)?.trim()?.trim('"').orEmpty()
+                    if (method.isNotBlank() && !method.equals("NONE", true) && !method.equals("AES-128", true)) {
+                        drm = true
+                    }
+                    if (line.contains("KEYFORMAT", true) && !line.contains("identity", true)) drm = true
+                }
+
+                line.startsWith("#EXTINF:", true) -> {
+                    sawMediaSegments = true
+                    durationSeconds += line.substringAfter(':').substringBefore(',').toDoubleOrNull() ?: 0.0
+                }
             }
+        }
+
+        val isLive = when {
+            variantCount > 0 && !sawMediaSegments -> null
+            sawMediaSegments -> !manifest.contains("#EXT-X-ENDLIST", true)
+            else -> resource.isLive
         }
 
         return resource.copy(
             width = maxWidth,
             height = maxHeight,
             durationMs = resource.durationMs ?: durationSeconds.takeIf { it > 0.0 }?.times(1000.0)?.toLong(),
+            variantCount = variantCount.takeIf { it > 0 } ?: resource.variantCount,
+            audioTrackCount = audioTracks.takeIf { it > 0 } ?: resource.audioTrackCount,
+            subtitleTrackCount = subtitleTracks.takeIf { it > 0 } ?: resource.subtitleTrackCount,
+            maxBandwidth = maxBandwidth.takeIf { it > 0L } ?: resource.maxBandwidth,
+            isLive = isLive,
+            drmDetected = if (drm) true else resource.drmDetected ?: false,
         )
     }
 
     private fun enrichDash(resource: Resource, manifest: String): Resource {
         var maxWidth = resource.width
         var maxHeight = resource.height
+        var variants = 0
+        var audioTracks = 0
+        var subtitleTracks = 0
+        var maxBandwidth = resource.maxBandwidth ?: 0L
 
         Regex("""<Representation\b[^>]*>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
             .findAll(manifest)
             .forEach { match ->
                 val tag = match.value
+                variants++
                 val width = Regex("""\bwidth=["'](\d+)["']""", RegexOption.IGNORE_CASE)
                     .find(tag)?.groupValues?.getOrNull(1)?.toIntOrNull()
                 val height = Regex("""\bheight=["'](\d+)["']""", RegexOption.IGNORE_CASE)
                     .find(tag)?.groupValues?.getOrNull(1)?.toIntOrNull()
-                if (width != null && height != null) {
-                    if ((width.toLong() * height) > ((maxWidth ?: 0).toLong() * (maxHeight ?: 0))) {
-                        maxWidth = width
-                        maxHeight = height
-                    }
+                val bandwidth = Regex("""\bbandwidth=["'](\d+)["']""", RegexOption.IGNORE_CASE)
+                    .find(tag)?.groupValues?.getOrNull(1)?.toLongOrNull()
+                if (bandwidth != null) maxBandwidth = maxOf(maxBandwidth, bandwidth)
+                if (width != null && height != null &&
+                    (width.toLong() * height) > ((maxWidth ?: 0).toLong() * (maxHeight ?: 0))
+                ) {
+                    maxWidth = width
+                    maxHeight = height
+                }
+            }
+
+        Regex("""<AdaptationSet\b[^>]*>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            .findAll(manifest)
+            .forEach { match ->
+                val tag = match.value.lowercase()
+                when {
+                    tag.contains("contenttype="audio"") || tag.contains("mimetype="audio/") ||
+                        tag.contains("contenttype='audio'") || tag.contains("mimetype='audio/") -> audioTracks++
+                    tag.contains("contenttype="text"") || tag.contains("mimetype="text/") ||
+                        tag.contains("application/ttml") || tag.contains("application/mp4") && tag.contains("subtitle") -> subtitleTracks++
                 }
             }
 
@@ -469,10 +536,32 @@ class HttpResourceStreamInspector(
             ?.getOrNull(1)
             ?.let(::parseIsoDurationMs)
 
+        val mpdTag = Regex("""<MPD\b[^>]*>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            .find(manifest)?.value.orEmpty()
+        val isLive = when {
+            Regex("""\btype=["']dynamic["']""", RegexOption.IGNORE_CASE).containsMatchIn(mpdTag) -> true
+            Regex("""\btype=["']static["']""", RegexOption.IGNORE_CASE).containsMatchIn(mpdTag) -> false
+            else -> resource.isLive
+        }
+
+        val drm = manifest.contains("<ContentProtection", true) &&
+            (
+                manifest.contains("cenc:pssh", true) ||
+                manifest.contains("widevine", true) ||
+                manifest.contains("playready", true) ||
+                manifest.contains("urn:uuid:", true)
+            )
+
         return resource.copy(
             width = maxWidth,
             height = maxHeight,
             durationMs = resource.durationMs ?: duration,
+            variantCount = variants.takeIf { it > 0 } ?: resource.variantCount,
+            audioTrackCount = audioTracks.takeIf { it > 0 } ?: resource.audioTrackCount,
+            subtitleTrackCount = subtitleTracks.takeIf { it > 0 } ?: resource.subtitleTrackCount,
+            maxBandwidth = maxBandwidth.takeIf { it > 0L } ?: resource.maxBandwidth,
+            isLive = isLive,
+            drmDetected = if (drm) true else resource.drmDetected ?: false,
         )
     }
 
