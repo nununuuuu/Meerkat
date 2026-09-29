@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -60,12 +60,6 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Prepare release asset
-        if: github.ref == 'refs/heads/main'
-        run: |
-          cp app/build/outputs/apk/debug/app-debug.apk Meerkat-v0.6.0-beta1-debug.apk
-          sha256sum Meerkat-v0.6.0-beta1-debug.apk > Meerkat-v0.6.0-beta1-debug.apk.sha256
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -73,36 +67,3 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
-      - name: Publish v0.6.0-beta1
-        if: github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cat > release-notes.md <<'EOF'
-          Meerkat v0.6.0-beta1 rebuilds the app around a mobile resource-sniffing core instead of the old Gecko/Cat Catch runtime.
-
-          Core capture:
-          - Built-in browser capture: requests, DOM/dynamic DOM, fetch, XHR, WebSocket, Performance API, Worker/ServiceWorker, MSE and Blob resources.
-          - External-app capture through an on-device VPN + optional local CA HTTPS MITM.
-          - QUIC/HTTP3 downgrade to inspectable TCP where the client supports fallback.
-          - HTTP/1.1 framing, keep-alive, chunked bodies, redirects, compressed text response decoding and deep URL search.
-          - Resource classification for images, video, audio, PDF/EPUB, Word, Excel, PowerPoint, OpenDocument, text files and archives.
-          - Short-lived resource response snapshots so expiring URLs can still be saved after capture.
-
-          Streaming:
-          - HLS master/nested master, variants, external audio/subtitle groups, AES-128, byte ranges, fMP4 init segments, VOD and live recording.
-          - Single-track and dual-track HLS live recording with playlist refresh and muxing.
-          - DASH SegmentTemplate, SegmentTimeline, SegmentList, SegmentBase/SIDX byte ranges, BaseURL inheritance, subtitles, Multi-Period and dynamic MPD recording.
-          - DRM/CENC is detected and not decrypted.
-
-          Downloads:
-          - Authenticated replay with Cookie/Referer/User-Agent.
-          - Original Content-Disposition filenames and MIME preservation.
-          - Retry, safe ETag/Last-Modified If-Range resume and parallel ranged downloads for large direct files.
-          - Batch selection/download and current-session filtering.
-
-          Android platform limitation:
-          Apps that reject user-installed CAs or use certificate pinning cannot be transparently decrypted without root/hooking. Those connections are bypassed rather than deliberately breaking the target app.
-          EOF
-
-          gh release create v0.6.0-beta1             Meerkat-v0.6.0-beta1-debug.apk             Meerkat-v0.6.0-beta1-debug.apk.sha256             --repo "$GITHUB_REPOSITORY"             --target "$GITHUB_SHA"             --title "Meerkat v0.6.0-beta1"             --prerelease             --notes-file release-notes.md
