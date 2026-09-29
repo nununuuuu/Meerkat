@@ -22,6 +22,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val resources = SnifferRepository.preferredResources
     val rawResources = SnifferRepository.resources
     val currentSession = SessionStore.current
+    val browserSession = SessionStore.browser
+    val externalSession = SessionStore.external
     private val ids = AtomicLong(System.currentTimeMillis())
 
     fun recordWebResource(
