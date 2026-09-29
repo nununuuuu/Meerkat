@@ -758,7 +758,7 @@ class HttpResourceStreamInspector(
 
         val resource = Resource(
             id = ids.getAndIncrement(),
-            sessionId = SessionStore.idOrDefault(),
+            sessionId = SessionStore.externalIdOrDefault(),
             sourceAppPackage = sourcePackage,
             sourceAppName = sourceName,
             url = request.url,
