@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLDecoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
@@ -53,49 +54,81 @@ object ResourceValidator {
     private fun validateNow(resource: Resource): Resource {
         return runCatching {
             val head = open(resource, "HEAD")
-            val finalUrl = head.url?.toString() ?: resource.url
+            var finalUrl = head.url?.toString() ?: resource.url
             var mime = head.contentType?.substringBefore(';')?.trim() ?: resource.mimeType
             var length = head.getHeaderFieldLong("Content-Length", -1L).takeIf { it >= 0 } ?: resource.contentLength
-            val etag = head.getHeaderField("ETag")
+            var etag = head.getHeaderField("ETag") ?: resource.etag
+            var fileName = parseDispositionFileName(head.getHeaderField("Content-Disposition")) ?: resource.fileName
             val headCode = head.responseCode
             head.disconnect()
 
             var width = resource.width
             var height = resource.height
-            var classification = ResourceClassifier.classify(finalUrl, mime)
 
-            if (classification.type == ResourceType.IMAGE) {
-                val get = open(resource.copy(url = finalUrl), "GET", "bytes=0-262143")
+            fun classificationUrl(): String {
+                val base = finalUrl ?: resource.url.orEmpty()
+                return if (!fileName.isNullOrBlank()) {
+                    base + (if (base.contains('?')) "&" else "?") + "filename=" + Uri.encode(fileName)
+                } else base
+            }
+
+            var classification = ResourceClassifier.classify(classificationUrl(), mime)
+            val needsProbe =
+                headCode !in 200..399 ||
+                    mime.isNullOrBlank() ||
+                    mime.equals("application/octet-stream", true) ||
+                    length == null ||
+                    fileName == null ||
+                    classification.type == ResourceType.IMAGE
+
+            if (needsProbe) {
+                val range = if (classification.type == ResourceType.IMAGE) "bytes=0-262143" else "bytes=0-0"
+                val get = open(resource.copy(url = finalUrl), "GET", range)
                 if (get.responseCode in 200..299 || get.responseCode == HttpURLConnection.HTTP_PARTIAL) {
+                    finalUrl = get.url?.toString() ?: finalUrl
                     mime = get.contentType?.substringBefore(';')?.trim() ?: mime
-                    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    get.inputStream.use { BitmapFactory.decodeStream(it, null, options) }
-                    if (options.outWidth > 0 && options.outHeight > 0) {
-                        width = options.outWidth
-                        height = options.outHeight
+                    fileName = parseDispositionFileName(get.getHeaderField("Content-Disposition")) ?: fileName
+                    etag = get.getHeaderField("ETag") ?: etag
+
+                    val rangeTotal = get.getHeaderField("Content-Range")
+                        ?.substringAfterLast('/')
+                        ?.toLongOrNull()
+                    val responseLength = get.getHeaderFieldLong("Content-Length", -1L)
+                        .takeIf { it >= 0 }
+                    length = when {
+                        rangeTotal != null -> rangeTotal
+                        get.responseCode == HttpURLConnection.HTTP_OK -> responseLength ?: length
+                        else -> length
                     }
-                    if (get.responseCode == HttpURLConnection.HTTP_OK) {
-                        length = get.getHeaderFieldLong("Content-Length", -1L).takeIf { it >= 0 } ?: length
+
+                    if (classification.type == ResourceType.IMAGE) {
+                        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        get.inputStream.use { BitmapFactory.decodeStream(it, null, options) }
+                        if (options.outWidth > 0 && options.outHeight > 0) {
+                            width = options.outWidth
+                            height = options.outHeight
+                        }
+                    } else {
+                        runCatching { get.inputStream.close() }
                     }
-                }
-                get.disconnect()
-            } else if (headCode !in 200..399) {
-                val get = open(resource, "GET", "bytes=0-0")
-                if (get.responseCode in 200..299 || get.responseCode == HttpURLConnection.HTTP_PARTIAL) {
-                    mime = get.contentType?.substringBefore(';')?.trim() ?: mime
-                    val total = get.getHeaderField("Content-Range")?.substringAfterLast('/')?.toLongOrNull()
-                    length = total ?: get.getHeaderFieldLong("Content-Length", -1L).takeIf { it >= 0 } ?: length
                 }
                 get.disconnect()
             }
 
-            classification = ResourceClassifier.classify(finalUrl, mime)
+            classification = ResourceClassifier.classify(classificationUrl(), mime)
             val parsed = runCatching { Uri.parse(finalUrl) }.getOrNull()
+            val extension = fileName
+                ?.substringAfterLast('.', "")
+                ?.lowercase()
+                ?.takeIf { it.isNotBlank() }
+                ?: ResourceClassifier.extensionFromUrl(finalUrl).ifBlank { resource.extension }
+
             resource.copy(
                 finalUrl = finalUrl,
                 host = parsed?.host ?: resource.host,
                 mimeType = mime,
-                extension = ResourceClassifier.extensionFromUrl(finalUrl).ifBlank { resource.extension },
+                extension = extension,
+                fileName = fileName,
                 contentLength = length,
                 type = classification.type,
                 streamType = classification.streamType,
@@ -113,6 +146,22 @@ object ResourceValidator {
                 verifiedAt = System.currentTimeMillis(),
             )
         }
+    }
+
+    private fun parseDispositionFileName(value: String?): String? {
+        if (value.isNullOrBlank()) return null
+        val encoded = Regex("""filename\*=UTF-8''([^;]+)""", RegexOption.IGNORE_CASE)
+            .find(value)
+            ?.groupValues
+            ?.getOrNull(1)
+        if (!encoded.isNullOrBlank()) {
+            return runCatching { URLDecoder.decode(encoded, "UTF-8") }.getOrDefault(encoded)
+        }
+        return Regex("""filename="?([^";]+)"?""", RegexOption.IGNORE_CASE)
+            .find(value)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
     }
 
     private fun open(resource: Resource, method: String, range: String? = null): HttpURLConnection {
