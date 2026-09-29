@@ -119,7 +119,7 @@ class DashDownloadService : Service() {
         return START_NOT_STICKY
     }
 
-    private enum class TrackKind { VIDEO, AUDIO, OTHER }
+    private enum class TrackKind { VIDEO, AUDIO, TEXT, OTHER }
 
     private data class TimelineEntry(val t: Long?, val d: Long, val r: Int)
 
@@ -129,6 +129,7 @@ class DashDownloadService : Service() {
         val bandwidth: Long,
         val width: Int?,
         val height: Int?,
+        val mimeType: String?,
         val baseUrl: String,
         val initialization: String?,
         val media: String?,
@@ -256,6 +257,7 @@ class DashDownloadService : Service() {
             val video = tempFiles.firstOrNull { it.first == TrackKind.VIDEO }?.second
             val audio = tempFiles.firstOrNull { it.first == TrackKind.AUDIO }?.second
 
+            val primaryFiles = tempFiles.filter { it.first != TrackKind.TEXT }
             val localUri = if (video != null && audio != null) {
                 val muxed = File(cacheDir, "dash-${recordId ?: System.currentTimeMillis()}-muxed.mp4")
                 try {
@@ -264,8 +266,23 @@ class DashDownloadService : Service() {
                 } finally {
                     muxed.delete()
                 }
+            } else if (primaryFiles.isNotEmpty()) {
+                copyToDownloads(primaryFiles.first().second, outputName)
             } else {
-                copyToDownloads(tempFiles.first().second, outputName)
+                val textOnly = tempFiles.firstOrNull { it.first == TrackKind.TEXT }
+                    ?: error("沒有可保存的 DASH 軌道")
+                copySubtitleTrackToDownloads(
+                    selected.first { it.kind == TrackKind.TEXT },
+                    textOnly.second,
+                )
+            }
+
+            selected.firstOrNull { it.kind == TrackKind.TEXT }?.let { subtitleRep ->
+                tempFiles.firstOrNull { it.first == TrackKind.TEXT }?.second?.let { subtitleFile ->
+                    if (primaryFiles.isNotEmpty()) {
+                        copySubtitleTrackToDownloads(subtitleRep, subtitleFile)
+                    }
+                }
             }
             return localUri
         } finally {
@@ -303,6 +320,16 @@ class DashDownloadService : Service() {
                         adaptationBase = null
                         adaptationTemplate = null
                         adaptationSegmentList = null
+                    }
+                    "Role" -> {
+                        val role = parser.getAttributeValue(null, "value").orEmpty().lowercase()
+                        if (
+                            role.contains("subtitle") ||
+                            role.contains("caption") ||
+                            role.contains("text")
+                        ) {
+                            adaptationKind = TrackKind.TEXT
+                        }
                     }
                     "Representation" -> {
                         currentRep = RepBuilder(
@@ -391,6 +418,7 @@ class DashDownloadService : Service() {
                                 bandwidth = b.bandwidth,
                                 width = b.width,
                                 height = b.height,
+                                mimeType = b.mimeType,
                                 baseUrl = resolve(mpdUrl, b.baseUrl ?: adaptationBase ?: "."),
                                 initialization = template?.initialization,
                                 media = template?.media,
@@ -418,6 +446,7 @@ class DashDownloadService : Service() {
     ): List<Representation> {
         val videoCandidates = manifest.representations.filter { it.kind == TrackKind.VIDEO }
         val audioCandidates = manifest.representations.filter { it.kind == TrackKind.AUDIO }
+        val textCandidates = manifest.representations.filter { it.kind == TrackKind.TEXT }
         val comparator = compareBy<Representation> { it.height ?: 0 }.thenBy { it.bandwidth }
 
         val video = when (quality) {
@@ -428,8 +457,9 @@ class DashDownloadService : Service() {
             DownloadQuality.HIGH -> audioCandidates.maxByOrNull { it.bandwidth }
             DownloadQuality.LOW -> audioCandidates.minByOrNull { it.bandwidth }
         }
+        val text = textCandidates.maxByOrNull { it.bandwidth }
 
-        return listOfNotNull(video, audio).ifEmpty {
+        return listOfNotNull(video, audio, text).ifEmpty {
             val all = manifest.representations
             listOfNotNull(
                 when (quality) {
@@ -485,6 +515,50 @@ class DashDownloadService : Service() {
             muxer.release()
             videoExtractor.release()
             audioExtractor.release()
+        }
+    }
+
+    private fun copySubtitleTrackToDownloads(
+        representation: Representation,
+        file: File,
+    ): String {
+        val mime = representation.mimeType?.substringBefore(';')?.lowercase().orEmpty()
+        val extension = when {
+            mime == "text/vtt" -> "vtt"
+            mime.contains("ttml") || mime.contains("xml") -> "ttml"
+            mime == "application/mp4" -> "mp4"
+            else -> "bin"
+        }
+        val outputMime = when (extension) {
+            "vtt" -> "text/vtt"
+            "ttml" -> "application/ttml+xml"
+            "mp4" -> "application/mp4"
+            else -> "application/octet-stream"
+        }
+        val displayName = "Meerkat-" + System.currentTimeMillis() + "-subtitle." + extension
+
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+            put(MediaStore.Downloads.MIME_TYPE, outputMime)
+            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Meerkat")
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: error("無法建立 DASH 字幕檔案")
+        try {
+            contentResolver.openOutputStream(uri, "w")?.use { output ->
+                file.inputStream().use { input -> input.copyTo(output) }
+            } ?: error("無法寫入 DASH 字幕檔案")
+            contentResolver.update(
+                uri,
+                ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) },
+                null,
+                null,
+            )
+            return uri.toString()
+        } catch (error: Throwable) {
+            runCatching { contentResolver.delete(uri, null, null) }
+            throw error
         }
     }
 
@@ -585,6 +659,11 @@ class DashDownloadService : Service() {
         return when {
             value.contains("video") -> TrackKind.VIDEO
             value.contains("audio") -> TrackKind.AUDIO
+            value.contains("text") ||
+                value.contains("subtitle") ||
+                value.contains("caption") ||
+                value.contains("ttml") ||
+                value.contains("vtt") -> TrackKind.TEXT
             else -> TrackKind.OTHER
         }
     }
