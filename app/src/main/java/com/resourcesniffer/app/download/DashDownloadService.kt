@@ -124,6 +124,7 @@ class DashDownloadService : Service() {
     private data class TimelineEntry(val t: Long?, val d: Long, val r: Int)
 
     private data class Representation(
+        val periodIndex: Int,
         val kind: TrackKind,
         val id: String,
         val bandwidth: Long,
@@ -214,6 +215,7 @@ class DashDownloadService : Service() {
     )
 
     private data class RepBuilder(
+        val periodIndex: Int,
         val kind: TrackKind,
         val id: String,
         val bandwidth: Long,
@@ -243,73 +245,118 @@ class DashDownloadService : Service() {
         }
 
         val manifest = parseMpd(xml, mpdUrl)
-        val selected = selectRepresentations(manifest, quality)
-        require(selected.isNotEmpty()) { "找不到可下載的 DASH 軌道" }
+        val selectedByPeriod = selectRepresentationsByPeriod(manifest, quality)
+        require(selectedByPeriod.isNotEmpty()) { "找不到可下載的 DASH 軌道" }
 
-        val segmentLists = selected.associateWith { it.segmentUrls() }
+        val flattened = selectedByPeriod.values.flatten()
+        val segmentLists = flattened.associateWith { it.segmentUrls() }
         require(segmentLists.values.any { it.isNotEmpty() }) { "此 MPD 的分段格式目前不支援" }
 
-        val total = selected.sumOf { (if (it.initializationUrl() != null) 1 else 0) + (segmentLists[it]?.size ?: 0) }
+        val total = flattened.sumOf {
+            (if (it.initializationUrl() != null) 1 else 0) +
+                (segmentLists[it]?.size ?: 0)
+        }
         var done = 0
-        val tempFiles = mutableListOf<Pair<TrackKind, File>>()
+        val allTempFiles = mutableListOf<File>()
+        val periodPrimaryFiles = mutableListOf<File>()
+        val periodSubtitlePairs = mutableListOf<Pair<Representation, File>>()
+        val stamp = recordId ?: System.currentTimeMillis().toString()
 
         try {
-            selected.forEach { rep ->
+            selectedByPeriod.toSortedMap().forEach { (periodIndex, selected) ->
                 ensureNotCancelled(recordId)
-                val suffix = rep.kind.name.lowercase()
-                val temp = File(cacheDir, "dash-${recordId ?: System.currentTimeMillis()}-$suffix.mp4")
-                FileOutputStream(temp).use { output ->
-                    rep.initializationUrl()?.let { initUrl ->
-                        output.write(fetchBytes(initUrl, headers))
-                        done++
-                        updateProgress(recordId, done, total)
-                    }
+                val tempFiles = mutableListOf<Pair<TrackKind, File>>()
 
-                    segmentLists[rep].orEmpty().forEach { segment ->
-                        ensureNotCancelled(recordId)
-                        output.write(fetchBytes(segment, headers))
-                        done++
-                        updateProgress(recordId, done, total)
+                selected.forEachIndexed { repIndex, rep ->
+                    ensureNotCancelled(recordId)
+                    val suffix = rep.kind.name.lowercase()
+                    val temp = File(
+                        cacheDir,
+                        "dash-" + stamp + "-p" + periodIndex + "-" + suffix + "-" + repIndex + ".bin",
+                    )
+                    FileOutputStream(temp).use { output ->
+                        rep.initializationUrl()?.let { initUrl ->
+                            output.write(fetchBytes(initUrl, headers))
+                            done++
+                            updateProgress(recordId, done, total)
+                        }
+
+                        segmentLists[rep].orEmpty().forEach { segment ->
+                            ensureNotCancelled(recordId)
+                            output.write(fetchBytes(segment, headers))
+                            done++
+                            updateProgress(recordId, done, total)
+                        }
+                        output.fd.sync()
+                    }
+                    allTempFiles += temp
+                    tempFiles += rep.kind to temp
+                    if (rep.kind == TrackKind.TEXT) {
+                        periodSubtitlePairs += rep to temp
                     }
                 }
-                tempFiles += rep.kind to temp
+
+                val video = tempFiles.firstOrNull { it.first == TrackKind.VIDEO }?.second
+                val audio = tempFiles.firstOrNull { it.first == TrackKind.AUDIO }?.second
+                val primary = tempFiles.filter { it.first != TrackKind.TEXT }
+
+                when {
+                    video != null && audio != null -> {
+                        val muxed = File(cacheDir, "dash-" + stamp + "-p" + periodIndex + "-muxed.mp4")
+                        muxMp4(video, audio, muxed)
+                        allTempFiles += muxed
+                        periodPrimaryFiles += muxed
+                    }
+                    primary.isNotEmpty() -> periodPrimaryFiles += primary.first().second
+                }
             }
 
             ensureNotCancelled(recordId)
-            val outputName = "Meerkat-${System.currentTimeMillis()}.mp4"
-            val video = tempFiles.firstOrNull { it.first == TrackKind.VIDEO }?.second
-            val audio = tempFiles.firstOrNull { it.first == TrackKind.AUDIO }?.second
 
-            val primaryFiles = tempFiles.filter { it.first != TrackKind.TEXT }
-            val localUri = if (video != null && audio != null) {
-                val muxed = File(cacheDir, "dash-${recordId ?: System.currentTimeMillis()}-muxed.mp4")
-                try {
-                    muxMp4(video, audio, muxed)
-                    copyToDownloads(muxed, outputName)
-                } finally {
-                    muxed.delete()
-                }
-            } else if (primaryFiles.isNotEmpty()) {
-                copyToDownloads(primaryFiles.first().second, outputName)
-            } else {
-                val textOnly = tempFiles.firstOrNull { it.first == TrackKind.TEXT }
-                    ?: error("沒有可保存的 DASH 軌道")
+            periodSubtitlePairs.forEachIndexed { index, (rep, file) ->
                 copySubtitleTrackToDownloads(
-                    selected.first { it.kind == TrackKind.TEXT },
-                    textOnly.second,
+                    representation = rep,
+                    file = file,
+                    suffix = if (selectedByPeriod.size > 1) "-part" + (index + 1) else "",
                 )
             }
 
-            selected.firstOrNull { it.kind == TrackKind.TEXT }?.let { subtitleRep ->
-                tempFiles.firstOrNull { it.first == TrackKind.TEXT }?.second?.let { subtitleFile ->
-                    if (primaryFiles.isNotEmpty()) {
-                        copySubtitleTrackToDownloads(subtitleRep, subtitleFile)
-                    }
+            if (periodPrimaryFiles.isEmpty()) {
+                val textOnly = periodSubtitlePairs.firstOrNull()
+                    ?: error("沒有可保存的 DASH 軌道")
+                return copySubtitleTrackToDownloads(textOnly.first, textOnly.second)
+            }
+
+            val outputName = "Meerkat-" + System.currentTimeMillis() + ".mp4"
+            if (periodPrimaryFiles.size == 1) {
+                return copyToDownloads(periodPrimaryFiles.first(), outputName)
+            }
+
+            val concatenated = File(cacheDir, "dash-" + stamp + "-all-periods.mp4")
+            val merged = runCatching {
+                concatenateMp4Periods(periodPrimaryFiles, concatenated)
+                copyToDownloads(concatenated, outputName)
+            }.getOrNull()
+            allTempFiles += concatenated
+
+            if (merged != null) return merged
+
+            var firstUri: String? = null
+            periodPrimaryFiles.forEachIndexed { index, part ->
+                val uri = copyToDownloads(
+                    part,
+                    "Meerkat-" + System.currentTimeMillis() + "-part" + (index + 1) + ".mp4",
+                )
+                if (firstUri == null) firstUri = uri
+            }
+            recordId?.let { id ->
+                DownloadRegistry.update(id) { old ->
+                    old.copy(detail = "DASH 多 Period 格式不同，已分段保存")
                 }
             }
-            return localUri
+            return firstUri ?: error("無法保存 DASH Multi-Period")
         } finally {
-            tempFiles.forEach { it.second.delete() }
+            allTempFiles.distinct().forEach { it.delete() }
         }
     }
 
@@ -319,6 +366,7 @@ class DashDownloadService : Service() {
 
         var mpdDuration: Double? = null
         var periodDuration: Double? = null
+        var periodIndex = -1
         var adaptationKind = TrackKind.OTHER
         var adaptationMime: String? = null
         var adaptationBase: String? = null
@@ -334,7 +382,10 @@ class DashDownloadService : Service() {
             when (parser.eventType) {
                 XmlPullParser.START_TAG -> when (parser.name) {
                     "MPD" -> mpdDuration = parseIsoDuration(parser.getAttributeValue(null, "mediaPresentationDuration"))
-                    "Period" -> periodDuration = parseIsoDuration(parser.getAttributeValue(null, "duration"))
+                    "Period" -> {
+                        periodIndex++
+                        periodDuration = parseIsoDuration(parser.getAttributeValue(null, "duration"))
+                    }
                     "AdaptationSet" -> {
                         adaptationMime = parser.getAttributeValue(null, "mimeType")
                         adaptationKind = kindFor(
@@ -358,6 +409,7 @@ class DashDownloadService : Service() {
                     }
                     "Representation" -> {
                         currentRep = RepBuilder(
+                            periodIndex = periodIndex.coerceAtLeast(0),
                             kind = adaptationKind,
                             id = parser.getAttributeValue(null, "id") ?: "representation",
                             bandwidth = parser.getAttributeValue(null, "bandwidth")?.toLongOrNull() ?: 0L,
@@ -451,6 +503,7 @@ class DashDownloadService : Service() {
 
                             if (hasTemplate || hasList || looksLikeSingleFile) {
                                 reps += Representation(
+                                    periodIndex = b.periodIndex,
                                     kind = if (b.kind == TrackKind.OTHER) kindFor(null, b.mimeType) else b.kind,
                                     id = b.id,
                                     bandwidth = b.bandwidth,
@@ -480,34 +533,40 @@ class DashDownloadService : Service() {
         return Manifest(periodDuration ?: mpdDuration, reps)
     }
 
-    private fun selectRepresentations(
+    private fun selectRepresentationsByPeriod(
         manifest: Manifest,
         quality: DownloadQuality,
-    ): List<Representation> {
-        val videoCandidates = manifest.representations.filter { it.kind == TrackKind.VIDEO }
-        val audioCandidates = manifest.representations.filter { it.kind == TrackKind.AUDIO }
-        val textCandidates = manifest.representations.filter { it.kind == TrackKind.TEXT }
+    ): Map<Int, List<Representation>> {
         val comparator = compareBy<Representation> { it.height ?: 0 }.thenBy { it.bandwidth }
 
-        val video = when (quality) {
-            DownloadQuality.HIGH -> videoCandidates.maxWithOrNull(comparator)
-            DownloadQuality.LOW -> videoCandidates.minWithOrNull(comparator)
-        }
-        val audio = when (quality) {
-            DownloadQuality.HIGH -> audioCandidates.maxByOrNull { it.bandwidth }
-            DownloadQuality.LOW -> audioCandidates.minByOrNull { it.bandwidth }
-        }
-        val text = textCandidates.maxByOrNull { it.bandwidth }
+        return manifest.representations
+            .groupBy { it.periodIndex }
+            .toSortedMap()
+            .mapValues { (_, reps) ->
+                val videoCandidates = reps.filter { it.kind == TrackKind.VIDEO }
+                val audioCandidates = reps.filter { it.kind == TrackKind.AUDIO }
+                val textCandidates = reps.filter { it.kind == TrackKind.TEXT }
 
-        return listOfNotNull(video, audio, text).ifEmpty {
-            val all = manifest.representations
-            listOfNotNull(
-                when (quality) {
-                    DownloadQuality.HIGH -> all.maxByOrNull { it.bandwidth }
-                    DownloadQuality.LOW -> all.minByOrNull { it.bandwidth }
+                val video = when (quality) {
+                    DownloadQuality.HIGH -> videoCandidates.maxWithOrNull(comparator)
+                    DownloadQuality.LOW -> videoCandidates.minWithOrNull(comparator)
                 }
-            )
-        }
+                val audio = when (quality) {
+                    DownloadQuality.HIGH -> audioCandidates.maxByOrNull { it.bandwidth }
+                    DownloadQuality.LOW -> audioCandidates.minByOrNull { it.bandwidth }
+                }
+                val text = textCandidates.maxByOrNull { it.bandwidth }
+
+                listOfNotNull(video, audio, text).ifEmpty {
+                    listOfNotNull(
+                        when (quality) {
+                            DownloadQuality.HIGH -> reps.maxByOrNull { it.bandwidth }
+                            DownloadQuality.LOW -> reps.minByOrNull { it.bandwidth }
+                        }
+                    )
+                }
+            }
+            .filterValues { it.isNotEmpty() }
     }
 
     private fun muxMp4(videoFile: File, audioFile: File, outputFile: File) {
@@ -558,9 +617,94 @@ class DashDownloadService : Service() {
         }
     }
 
+    private fun concatenateMp4Periods(
+        periodFiles: List<File>,
+        outputFile: File,
+    ) {
+        require(periodFiles.size >= 2) { "至少需要兩個 DASH Period" }
+
+        val firstExtractor = MediaExtractor().apply {
+            setDataSource(periodFiles.first().absolutePath)
+        }
+        val muxer = MediaMuxer(
+            outputFile.absolutePath,
+            MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4,
+        )
+
+        val outputTrackByMime = linkedMapOf<String, Int>()
+        try {
+            for (track in 0 until firstExtractor.trackCount) {
+                val format = firstExtractor.getTrackFormat(track)
+                val mime = format.getString("mime").orEmpty()
+                if (!mime.startsWith("video/") && !mime.startsWith("audio/")) continue
+                if (mime !in outputTrackByMime) {
+                    outputTrackByMime[mime] = muxer.addTrack(format)
+                }
+            }
+            require(outputTrackByMime.isNotEmpty()) { "無法解析 DASH Period 軌道" }
+            muxer.start()
+
+            val buffer = ByteBuffer.allocate(2 * 1024 * 1024)
+            val info = MediaCodec.BufferInfo()
+            val nextOffsetByMime = mutableMapOf<String, Long>()
+
+            periodFiles.forEach { file ->
+                val extractor = MediaExtractor().apply { setDataSource(file.absolutePath) }
+                try {
+                    val tracks = mutableListOf<Triple<Int, String, Int>>()
+                    for (track in 0 until extractor.trackCount) {
+                        val format = extractor.getTrackFormat(track)
+                        val mime = format.getString("mime").orEmpty()
+                        val muxTrack = outputTrackByMime[mime] ?: continue
+                        extractor.selectTrack(track)
+                        tracks += Triple(track, mime, muxTrack)
+                    }
+                    require(tracks.isNotEmpty()) { "DASH Period 軌道格式不相容" }
+
+                    tracks.forEach { (trackIndex, mime, muxTrack) ->
+                        extractor.unselectAllTracksCompat()
+                        extractor.selectTrack(trackIndex)
+                        extractor.seekTo(0L, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+
+                        val offset = nextOffsetByMime[mime] ?: 0L
+                        var maxPts = offset
+                        while (true) {
+                            buffer.clear()
+                            val size = extractor.readSampleData(buffer, 0)
+                            if (size < 0) break
+                            val sampleTime = extractor.sampleTime
+                            if (sampleTime < 0L) break
+                            info.offset = 0
+                            info.size = size
+                            info.presentationTimeUs = offset + sampleTime
+                            info.flags = extractor.sampleFlags
+                            muxer.writeSampleData(muxTrack, buffer, info)
+                            maxPts = maxOf(maxPts, info.presentationTimeUs)
+                            extractor.advance()
+                        }
+                        nextOffsetByMime[mime] = maxPts + 1L
+                    }
+                } finally {
+                    extractor.release()
+                }
+            }
+        } finally {
+            firstExtractor.release()
+            runCatching { muxer.stop() }
+            muxer.release()
+        }
+    }
+
+    private fun MediaExtractor.unselectAllTracksCompat() {
+        for (track in 0 until trackCount) {
+            runCatching { unselectTrack(track) }
+        }
+    }
+
     private fun copySubtitleTrackToDownloads(
         representation: Representation,
         file: File,
+        suffix: String = "",
     ): String {
         val mime = representation.mimeType?.substringBefore(';')?.lowercase().orEmpty()
         val extension = when {
@@ -575,7 +719,7 @@ class DashDownloadService : Service() {
             "mp4" -> "application/mp4"
             else -> "application/octet-stream"
         }
-        val displayName = "Meerkat-" + System.currentTimeMillis() + "-subtitle." + extension
+        val displayName = "Meerkat-" + System.currentTimeMillis() + suffix + "-subtitle." + extension
 
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, displayName)
