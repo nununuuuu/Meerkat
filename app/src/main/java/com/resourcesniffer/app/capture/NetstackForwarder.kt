@@ -26,6 +26,7 @@ class NetstackForwarder(
     private val vpnService: VpnService,
     private val sourcePackage: String?,
     private val sourceName: String?,
+    private val localProxyPort: Int? = null,
 ) {
     private val executor = Executors.newCachedThreadPool()
     private val stopped = AtomicBoolean(false)
@@ -69,6 +70,10 @@ class NetstackForwarder(
     }
 
     private fun relayTcp(dstIp: String, dstPort: Int, conn: TCPConn) {
+        if (localProxyPort != null && (dstPort == 80 || dstPort == 443)) {
+            relayTcpViaProxy(dstIp, dstPort, conn, localProxyPort)
+            return
+        }
         val socket = Socket()
         openSockets += socket
         val inspector = HttpResourceStreamInspector(sourcePackage, sourceName)
@@ -128,6 +133,72 @@ class NetstackForwarder(
         }
     }
 
+    private fun relayTcpViaProxy(dstIp: String, dstPort: Int, conn: TCPConn, proxyPort: Int) {
+        val socket = Socket()
+        openSockets += socket
+        try {
+            val firstBuffer = ByteArray(64 * 1024)
+            val firstCount = try { conn.read(firstBuffer).toInt() } catch (_: Exception) { -1 }
+            if (firstCount <= 0) return
+            val firstBytes = firstBuffer.copyOfRange(0, firstCount)
+            val host = if (dstPort == 443) {
+                TlsClientHelloParser.parseSni(firstBytes, 0, firstBytes.size) ?: dstIp
+            } else dstIp
+
+            socket.tcpNoDelay = true
+            socket.connect(InetSocketAddress(InetAddress.getLoopbackAddress(), proxyPort), 5_000)
+            val proxyIn = socket.getInputStream()
+            val proxyOut = socket.getOutputStream()
+            val preface = "MEERKAT\t" + host + "\t" + dstIp + "\t" + dstPort + "\n"
+            proxyOut.write(preface.toByteArray(Charsets.US_ASCII))
+            proxyOut.write(firstBytes)
+            proxyOut.flush()
+
+            val closed = AtomicBoolean(false)
+            val upload = Thread {
+                val buffer = ByteArray(32 * 1024)
+                try {
+                    while (!stopped.get() && !closed.get()) {
+                        val n = try { conn.read(buffer).toInt() } catch (_: Exception) { -1 }
+                        if (n <= 0) break
+                        proxyOut.write(buffer, 0, n)
+                        proxyOut.flush()
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    closed.set(true)
+                    runCatching { socket.shutdownOutput() }
+                    runCatching { conn.close() }
+                }
+            }.apply { name = "Meerkat-Proxy-Up"; isDaemon = true }
+
+            val download = Thread {
+                val buffer = ByteArray(32 * 1024)
+                try {
+                    while (!stopped.get() && !closed.get()) {
+                        val n = proxyIn.read(buffer)
+                        if (n <= 0) break
+                        conn.write(if (n == buffer.size) buffer else buffer.copyOfRange(0, n))
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    closed.set(true)
+                    runCatching { socket.shutdownInput() }
+                    runCatching { conn.close() }
+                }
+            }.apply { name = "Meerkat-Proxy-Down"; isDaemon = true }
+
+            upload.start()
+            download.start()
+            upload.join()
+            download.join()
+        } catch (_: Exception) {
+        } finally {
+            runCatching { conn.close() }
+            runCatching { socket.close() }
+            openSockets -= socket
+        }
+    }
     private fun relayUdp(dstIp: String, dstPort: Int, conn: UDPConn) {
         val socket = DatagramSocket(null)
         openSockets += socket
