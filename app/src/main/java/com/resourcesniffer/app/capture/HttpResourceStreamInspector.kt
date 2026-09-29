@@ -639,6 +639,7 @@ class HttpResourceStreamInspector(
             host = uri?.host ?: "未知來源",
             mimeType = mime,
             extension = extension,
+            fileName = fileName,
             contentLength = contentLength,
             type = classification.type,
             streamType = classification.streamType,
