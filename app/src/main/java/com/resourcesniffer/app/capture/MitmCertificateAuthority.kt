@@ -1,8 +1,10 @@
 package com.resourcesniffer.app.capture
 
 import android.content.Context
-import android.content.Intent
-import android.security.KeyChain
+import android.content.ContentValues
+import android.net.Uri
+import android.os.Environment
+import android.provider.MediaStore
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.asn1.x509.BasicConstraints
 import org.bouncycastle.asn1.x509.Extension
@@ -69,11 +71,35 @@ class MitmCertificateAuthority(private val context: Context) {
         return certificate
     }
 
-    fun installIntent(): Intent {
+    fun exportToDownloads(): Uri {
         val certificate = ensureCa()
-        return KeyChain.createInstallIntent().apply {
-            putExtra(KeyChain.EXTRA_CERTIFICATE, certificate.encoded)
-            putExtra(KeyChain.EXTRA_NAME, "Meerkat Local CA")
+        val resolver = context.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, "Meerkat-Local-CA.crt")
+            put(MediaStore.Downloads.MIME_TYPE, "application/x-x509-ca-cert")
+            put(
+                MediaStore.Downloads.RELATIVE_PATH,
+                Environment.DIRECTORY_DOWNLOADS + "/Meerkat",
+            )
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: error("無法建立 CA 憑證檔案")
+        try {
+            resolver.openOutputStream(uri, "w")?.use { output ->
+                output.write(certificate.encoded)
+                output.flush()
+            } ?: error("無法寫入 CA 憑證檔案")
+            resolver.update(
+                uri,
+                ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) },
+                null,
+                null,
+            )
+            return uri
+        } catch (error: Throwable) {
+            runCatching { resolver.delete(uri, null, null) }
+            throw error
         }
     }
 
