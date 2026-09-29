@@ -131,7 +131,7 @@ private fun MeerkatApp(
     var mitmCaInstalled by remember { mutableStateOf(viewModel.isMitmCaInstalled()) }
 
     val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
-    val caInstallLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+    val caSettingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         mitmCaInstalled = viewModel.isMitmCaInstalled()
     }
     val overlayLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -258,7 +258,24 @@ private fun MeerkatApp(
                         },
                         caInstalled = mitmCaInstalled,
                         caFingerprint = viewModel.mitmCaFingerprint(),
-                        onInstallCa = { caInstallLauncher.launch(viewModel.mitmCaInstallIntent()) },
+                        onInstallCa = {
+                            runCatching {
+                                viewModel.exportMitmCaCertificate()
+                            }.onSuccess {
+                                Toast.makeText(
+                                    context,
+                                    "已匯出到 Downloads/Meerkat/Meerkat-Local-CA.crt",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                                caSettingsLauncher.launch(viewModel.caSettingsIntent())
+                            }.onFailure { error ->
+                                Toast.makeText(
+                                    context,
+                                    "CA 匯出失敗：${error.message ?: "未知錯誤"}",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            }
+                        },
                     )
                     MainMode.RESOURCES -> ResourcePane(
                         resources = resources,
@@ -1008,13 +1025,13 @@ private fun ExternalAppPane(
                     if (caInstalled) {
                         "HTTPS 深度嗅探已就緒：Meerkat Local CA 已安裝。"
                     } else {
-                        "尚未安裝 Meerkat Local CA。未安裝時仍可啟動一般嗅探，但 HTTPS 內容可見性會較低。"
+                        "尚未安裝 Meerkat Local CA。Android 11+ 不允許一般 App 直接安裝 CA；Meerkat 會先把憑證匯出到 Downloads，再帶你到系統安全設定完成安裝。"
                     },
                     style = MaterialTheme.typography.bodySmall,
                 )
                 if (!caInstalled) {
                     OutlinedButton(onClick = onInstallCa) {
-                        Text("安裝 HTTPS CA")
+                        Text("匯出 CA 並開啟設定")
                     }
                 }
                 Text(
