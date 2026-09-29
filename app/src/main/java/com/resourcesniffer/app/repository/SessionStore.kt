@@ -8,61 +8,62 @@ import java.util.concurrent.atomic.AtomicLong
 
 object SessionStore {
     private val nextId = AtomicLong(System.currentTimeMillis())
+
     private val _current = MutableStateFlow<SniffSession?>(null)
     val current: StateFlow<SniffSession?> = _current.asStateFlow()
 
-    @Volatile private var browserSession: SniffSession? = null
-    @Volatile private var externalSession: SniffSession? = null
+    private val _browser = MutableStateFlow<SniffSession?>(null)
+    val browser: StateFlow<SniffSession?> = _browser.asStateFlow()
+
+    private val _external = MutableStateFlow<SniffSession?>(null)
+    val external: StateFlow<SniffSession?> = _external.asStateFlow()
 
     @Synchronized
     fun startExternal(targetPackage: String? = null, targetName: String? = "全域 App 嗅探"): SniffSession {
+        _external.value?.takeIf { it.endedAt == null }?.let {
+            _current.value = it
+            return it
+        }
         val session = SniffSession(
             id = nextId.incrementAndGet(),
             startedAt = System.currentTimeMillis(),
             targetPackage = targetPackage,
             targetAppName = targetName,
         )
-        externalSession = session
+        _external.value = session
         _current.value = session
         return session
     }
 
     @Synchronized
     fun ensureBrowserSession(): SniffSession {
-        val existing = browserSession
-        if (existing != null && existing.endedAt == null) return existing
-
+        _browser.value?.takeIf { it.endedAt == null }?.let { return it }
         val session = SniffSession(
             id = nextId.incrementAndGet(),
             startedAt = System.currentTimeMillis(),
             targetPackage = null,
             targetAppName = "內建瀏覽器",
         )
-        browserSession = session
-
-        // External capture remains the active "current sniff" while it is running.
-        if (externalSession == null) {
-            _current.value = session
-        }
+        _browser.value = session
+        if (_external.value == null) _current.value = session
         return session
     }
 
     fun idOrDefault(): Long = _current.value?.id ?: 0L
-
-    fun externalIdOrDefault(): Long = externalSession?.id ?: 0L
+    fun browserIdOrDefault(): Long = _browser.value?.id ?: 0L
+    fun externalIdOrDefault(): Long = _external.value?.id ?: 0L
 
     @Synchronized
     fun stopExternal() {
-        val stopped = externalSession?.copy(endedAt = System.currentTimeMillis())
-        externalSession = null
-        _current.value = browserSession ?: stopped
+        val stopped = _external.value?.copy(endedAt = System.currentTimeMillis())
+        _external.value = null
+        _current.value = _browser.value ?: stopped
     }
 
     @Synchronized
     fun stopBrowser() {
-        browserSession = browserSession?.copy(endedAt = System.currentTimeMillis())
-        if (externalSession == null) {
-            _current.value = browserSession
-        }
+        val stopped = _browser.value?.copy(endedAt = System.currentTimeMillis())
+        _browser.value = stopped
+        if (_external.value == null) _current.value = stopped
     }
 }
