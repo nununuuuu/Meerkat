@@ -12,6 +12,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Base64
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
@@ -26,8 +27,11 @@ import android.widget.ImageView
 import android.widget.VideoView
 import android.widget.MediaController
 import android.graphics.BitmapFactory
+import java.io.File
+import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -277,9 +281,25 @@ private fun MeerkatApp(
 }
 
 private class BrowserCaptureBridge(
+    private val context: Context,
     private val viewModel: MainViewModel,
     private val userAgent: String,
 ) {
+    private data class BlobState(
+        val file: File,
+        val output: FileOutputStream,
+        val sourceUrl: String,
+        val mimeType: String?,
+        val expectedSize: Long,
+        val referer: String?,
+        var fileName: String?,
+        var received: Long = 0L,
+    )
+
+    private val blobs = ConcurrentHashMap<String, BlobState>()
+    private val blobNames = ConcurrentHashMap<String, String>()
+    private val blobDir = File(context.cacheDir, "browser-blobs").apply { mkdirs() }
+
     @JavascriptInterface
     fun resource(url: String?, mimeType: String?, referer: String?) {
         val target = url?.trim().orEmpty()
@@ -294,8 +314,130 @@ private class BrowserCaptureBridge(
             ),
         )
     }
-}
 
+    @JavascriptInterface
+    @Synchronized
+    fun blobBegin(
+        id: String?,
+        blobUrl: String?,
+        mimeType: String?,
+        size: Long,
+        referer: String?,
+        fileName: String?,
+    ) {
+        val safeId = id?.takeIf { it.matches(Regex("[A-Za-z0-9_-]{1,80}")) } ?: return
+        val source = blobUrl?.takeIf { it.startsWith("blob:", true) } ?: return
+        if (size <= 0L || size > MAX_BLOB_BYTES || blobs.size >= MAX_ACTIVE_BLOBS) return
+        blobs.remove(safeId)?.let { old ->
+            runCatching { old.output.close() }
+            old.file.delete()
+        }
+        val file = File(blobDir, safeId + ".blob")
+        val output = runCatching { FileOutputStream(file, false) }.getOrNull() ?: return
+        blobs[safeId] = BlobState(
+            file = file,
+            output = output,
+            sourceUrl = source,
+            mimeType = mimeType?.takeIf { it.isNotBlank() },
+            expectedSize = size,
+            referer = referer,
+            fileName = sanitizeName(fileName) ?: blobNames[source],
+        )
+    }
+
+    @JavascriptInterface
+    @Synchronized
+    fun blobName(blobUrl: String?, fileName: String?) {
+        val source = blobUrl?.takeIf { it.startsWith("blob:", true) } ?: return
+        val name = sanitizeName(fileName) ?: return
+        blobNames[source] = name
+        blobs.values.filter { it.sourceUrl == source }.forEach { it.fileName = name }
+    }
+
+    @JavascriptInterface
+    @Synchronized
+    fun blobChunk(id: String?, base64: String?) {
+        val state = blobs[id] ?: return
+        val encoded = base64 ?: return
+        val bytes = runCatching { Base64.decode(encoded, Base64.DEFAULT) }.getOrNull() ?: run {
+            abortBlob(id)
+            return
+        }
+        if (bytes.isEmpty() || state.received + bytes.size > state.expectedSize || state.received + bytes.size > MAX_BLOB_BYTES) {
+            abortBlob(id)
+            return
+        }
+        runCatching {
+            state.output.write(bytes)
+            state.received += bytes.size
+        }.onFailure { abortBlob(id) }
+    }
+
+    @JavascriptInterface
+    @Synchronized
+    fun blobEnd(id: String?) {
+        val key = id ?: return
+        val state = blobs.remove(key) ?: return
+        runCatching {
+            state.output.flush()
+            state.output.fd.sync()
+            state.output.close()
+            require(state.received == state.expectedSize) { "Blob size mismatch" }
+            viewModel.recordLocalResource(
+                sourceUrl = state.sourceUrl,
+                localCachePath = state.file.absolutePath,
+                mimeType = state.mimeType,
+                contentLength = state.received,
+                fileName = state.fileName ?: defaultBlobName(state.mimeType),
+                referer = state.referer,
+            )
+        }.onFailure {
+            runCatching { state.output.close() }
+            state.file.delete()
+        }
+    }
+
+    @JavascriptInterface
+    @Synchronized
+    fun blobAbort(id: String?) { abortBlob(id) }
+
+    private fun abortBlob(id: String?) {
+        val state = blobs.remove(id) ?: return
+        runCatching { state.output.close() }
+        state.file.delete()
+    }
+
+    private fun sanitizeName(value: String?): String? {
+        val clean = value
+            ?.replace(Regex("""[\\/:*?"<>|\u0000-\u001f]"""), "_")
+            ?.trim()
+            ?.trim('.')
+            ?.take(180)
+            .orEmpty()
+        return clean.takeIf { it.isNotBlank() }
+    }
+
+    private fun defaultBlobName(mime: String?): String {
+        val extension = when (mime?.substringBefore(';')?.lowercase()) {
+            "application/pdf" -> "pdf"
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" -> "docx"
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation" -> "pptx"
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" -> "xlsx"
+            "image/png" -> "png"
+            "image/jpeg" -> "jpg"
+            "image/webp" -> "webp"
+            "video/mp4" -> "mp4"
+            "audio/mpeg" -> "mp3"
+            else -> "bin"
+        }
+        return "Meerkat-blob-" + System.currentTimeMillis() + "." + extension
+    }
+
+    companion object {
+        private const val MAX_ACTIVE_BLOBS = 4
+        private const val MAX_BLOB_BYTES = 512L * 1024 * 1024
+    }
+}
 private fun installBrowserCapture(webView: WebView) {
     val script = """
         (function() {
@@ -329,6 +471,114 @@ private fun installBrowserCapture(webView: WebView) {
             }
           }
 
+          const MAX_BLOB_CAPTURE = 512 * 1024 * 1024;
+          const BLOB_CHUNK = 192 * 1024;
+          const bufferOrigins = new WeakMap();
+
+          function base64Bytes(bytes) {
+            let binary = "";
+            const step = 0x8000;
+            for (let i = 0; i < bytes.length; i += step) {
+              binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + step, bytes.length)));
+            }
+            return btoa(binary);
+          }
+
+          async function captureBlob(blob, blobUrl) {
+            if (!blob || !blobUrl || !blob.size || blob.size > MAX_BLOB_CAPTURE) return;
+            const id = "b" + Date.now().toString(36) + Math.random().toString(36).slice(2);
+            try {
+              MeerkatCapture.blobBegin(id, blobUrl, blob.type || "", Number(blob.size), location.href, blob.name || "");
+              for (let offset = 0; offset < blob.size; offset += BLOB_CHUNK) {
+                const part = blob.slice(offset, Math.min(blob.size, offset + BLOB_CHUNK));
+                const buffer = await part.arrayBuffer();
+                MeerkatCapture.blobChunk(id, base64Bytes(new Uint8Array(buffer)));
+              }
+              MeerkatCapture.blobEnd(id);
+            } catch (_) {
+              try { MeerkatCapture.blobAbort(id); } catch (_) {}
+            }
+          }
+
+          try {
+            const originalCreateObjectURL = URL.createObjectURL.bind(URL);
+            URL.createObjectURL = function(object) {
+              const result = originalCreateObjectURL(object);
+              try {
+                if (object instanceof Blob) captureBlob(object, result);
+              } catch (_) {}
+              return result;
+            };
+            document.addEventListener("click", function(event) {
+              try {
+                const anchor = event.target && event.target.closest ? event.target.closest("a") : null;
+                if (anchor && anchor.href && anchor.href.startsWith("blob:") && anchor.download) {
+                  MeerkatCapture.blobName(anchor.href, anchor.download);
+                }
+              } catch (_) {}
+            }, true);
+          } catch (_) {}
+
+          try {
+            const originalResponseArrayBuffer = Response.prototype.arrayBuffer;
+            Response.prototype.arrayBuffer = function() {
+              const response = this;
+              return originalResponseArrayBuffer.apply(this, arguments).then(function(buffer) {
+                try {
+                  bufferOrigins.set(buffer, {
+                    url: response.url || "",
+                    mime: response.headers && response.headers.get("content-type") || ""
+                  });
+                } catch (_) {}
+                return buffer;
+              });
+            };
+          } catch (_) {}
+
+          try {
+            if (window.MediaSource && MediaSource.prototype.addSourceBuffer && window.SourceBuffer) {
+              const originalAddSourceBuffer = MediaSource.prototype.addSourceBuffer;
+              MediaSource.prototype.addSourceBuffer = function(type) {
+                const sourceBuffer = originalAddSourceBuffer.apply(this, arguments);
+                try { sourceBuffer.__meerkatMime = type || ""; } catch (_) {}
+                return sourceBuffer;
+              };
+              const originalAppendBuffer = SourceBuffer.prototype.appendBuffer;
+              SourceBuffer.prototype.appendBuffer = function(data) {
+                try {
+                  const origin = bufferOrigins.get(data);
+                  if (origin && origin.url) report(origin.url, this.__meerkatMime || origin.mime || "");
+                } catch (_) {}
+                return originalAppendBuffer.apply(this, arguments);
+              };
+            }
+          } catch (_) {}
+
+          try {
+            const NativeWorker = window.Worker;
+            if (NativeWorker) {
+              window.Worker = function(url, options) {
+                report(url, "application/javascript");
+                return new NativeWorker(url, options);
+              };
+              window.Worker.prototype = NativeWorker.prototype;
+            }
+            const NativeSharedWorker = window.SharedWorker;
+            if (NativeSharedWorker) {
+              window.SharedWorker = function(url, options) {
+                report(url, "application/javascript");
+                return new NativeSharedWorker(url, options);
+              };
+              window.SharedWorker.prototype = NativeSharedWorker.prototype;
+            }
+            if (navigator.serviceWorker && navigator.serviceWorker.register) {
+              const originalRegister = navigator.serviceWorker.register.bind(navigator.serviceWorker);
+              navigator.serviceWorker.register = function(url, options) {
+                report(url, "application/javascript");
+                return originalRegister(url, options);
+              };
+            }
+          } catch (_) {}
           const originalFetch = window.fetch;
           if (originalFetch) {
             window.fetch = function(input, init) {
@@ -358,6 +608,9 @@ private fun installBrowserCapture(webView: WebView) {
               try {
                 const ct = this.getResponseHeader("content-type") || "";
                 report(this.responseURL || this.__meerkatUrl, ct);
+                if (this.responseType === "arraybuffer" && this.response) {
+                  try { bufferOrigins.set(this.response, {url:this.responseURL || this.__meerkatUrl || "", mime:ct}); } catch (_) {}
+                }
                 if ((ct.includes("json") || ct.startsWith("text/") || ct.includes("javascript") || ct.includes("xml")) && typeof this.responseText === "string") {
                   scanText(this.responseText);
                 }
@@ -549,7 +802,7 @@ private fun BrowserPane(
                     settings.javaScriptCanOpenWindowsAutomatically = true
                     settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                     addJavascriptInterface(
-                        BrowserCaptureBridge(viewModel, settings.userAgentString),
+                        BrowserCaptureBridge(ctx, viewModel, settings.userAgentString),
                         "MeerkatCapture",
                     )
 
