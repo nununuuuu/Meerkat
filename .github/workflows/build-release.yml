@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, "rebuild/mobile-parity" ]
     paths:
       - "app/**"
       - "*.gradle.kts"
@@ -37,17 +37,6 @@ jobs:
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "ndk;27.2.12479018"
           "$SDKMANAGER" "platforms;android-37.2"
-
-      - name: Vendor Cat Catch 2.7.2
-        run: |
-          rm -rf /tmp/cat-catch app/src/main/assets/catcatch
-          git clone https://github.com/xifangczy/cat-catch.git /tmp/cat-catch
-          cd /tmp/cat-catch
-          git checkout 8cdde7c32fd5bd8d367f861dad86702a8daa13b1
-          rm -rf .git .github
-          cp manifest.firefox.json manifest.json
-          mkdir -p "$GITHUB_WORKSPACE/app/src/main/assets/catcatch"
-          cp -a . "$GITHUB_WORKSPACE/app/src/main/assets/catcatch/"
 
       - name: Build gVisor netstack bridge
         env:
