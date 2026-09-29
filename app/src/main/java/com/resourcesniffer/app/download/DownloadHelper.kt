@@ -1,6 +1,5 @@
 package com.resourcesniffer.app.download
 
-import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -30,8 +29,10 @@ object DownloadHelper {
         val record = DownloadRecord(
             id = UUID.randomUUID().toString(),
             url = url,
-            displayName = URLUtil.guessFileName(url, null, resource.mimeType)
-                .ifBlank { "meerkat-resource-${System.currentTimeMillis()}" },
+            displayName = resource.fileName
+                ?.takeIf { it.isNotBlank() }
+                ?: URLUtil.guessFileName(url, null, resource.mimeType)
+                    .ifBlank { "meerkat-resource-${System.currentTimeMillis()}" },
             mimeType = resource.mimeType,
             streamType = resource.streamType,
             cookie = cookie,
@@ -46,13 +47,13 @@ object DownloadHelper {
 
     fun retry(context: Context, record: DownloadRecord) {
         val retried = record.copy(
-            id = UUID.randomUUID().toString(),
             state = DownloadState.QUEUED,
             progress = null,
             detail = "等待重新下載",
             createdAt = System.currentTimeMillis(),
         )
-        enqueueRecord(context, retried)
+        DownloadRegistry.add(retried)
+        enqueueExistingRecord(context, retried)
     }
 
     fun cancel(context: Context, record: DownloadRecord) {
@@ -62,7 +63,10 @@ object DownloadHelper {
 
     private fun enqueueRecord(context: Context, record: DownloadRecord) {
         DownloadRegistry.add(record)
+        enqueueExistingRecord(context, record)
+    }
 
+    private fun enqueueExistingRecord(context: Context, record: DownloadRecord) {
         val isHls = record.streamType == StreamType.HLS ||
             record.url.substringBefore('?').endsWith(".m3u8", true)
         val isDash = record.streamType == StreamType.DASH ||
@@ -181,24 +185,14 @@ object DownloadHelper {
         }.start()
     }
     private fun enqueueDirect(context: Context, record: DownloadRecord) {
-        val request = DownloadManager.Request(Uri.parse(record.url))
-            .setTitle(record.displayName)
-            .setDescription("Meerkat 資源下載")
-            .setMimeType(record.mimeType)
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, record.displayName)
-            .setAllowedOverMetered(true)
-            .setAllowedOverRoaming(true)
-
-        record.cookie?.takeIf { it.isNotBlank() }?.let { request.addRequestHeader("Cookie", it) }
-        record.userAgent?.takeIf { it.isNotBlank() }?.let { request.addRequestHeader("User-Agent", it) }
-        record.referer?.takeIf { it.isNotBlank() }?.let { request.addRequestHeader("Referer", it) }
-
-        val manager = context.getSystemService(DownloadManager::class.java)
-        val systemId = manager.enqueue(request)
-        DirectDownloadTracker.track(systemId, record.id)
+        ContextCompat.startForegroundService(
+            context,
+            Intent(context, DirectHttpDownloadService::class.java).apply {
+                putExtra(DirectHttpDownloadService.EXTRA_RECORD_ID, record.id)
+            }
+        )
         DownloadRegistry.update(record.id) {
-            it.copy(state = DownloadState.DOWNLOADING, detail = "下載中")
+            it.copy(state = DownloadState.DOWNLOADING, detail = "準備下載")
         }
     }
 
@@ -212,6 +206,7 @@ object DownloadHelper {
             host = Uri.parse(record.url).host ?: "未知來源",
             mimeType = record.mimeType,
             extension = null,
+            fileName = record.displayName,
             contentLength = null,
             type = when {
                 record.mimeType?.startsWith("image/") == true -> ResourceType.IMAGE
