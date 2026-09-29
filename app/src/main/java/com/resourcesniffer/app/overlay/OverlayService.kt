@@ -45,11 +45,11 @@ class OverlayService : Service() {
             val items = if (sessionId == 0L) {
                 emptyList()
             } else {
-                SnifferRepository.resources.value.filter { it.sessionId == sessionId }
+                SnifferRepository.preferredResources.value.filter { it.sessionId == sessionId }
             }
             bubble?.text = items.size.toString()
             panel?.findViewWithTag<TextView>("summary")?.text = buildSummary(items)
-            handler.postDelayed(this, 700)
+            handler.postDelayed(this, 250)
         }
     }
 
@@ -96,7 +96,7 @@ class OverlayService : Service() {
         val view = TextView(this).apply {
             text = SessionStore.externalIdOrDefault().let { sessionId ->
                 if (sessionId == 0L) 0
-                else SnifferRepository.resources.value.count { it.sessionId == sessionId }
+                else SnifferRepository.preferredResources.value.count { it.sessionId == sessionId }
             }.toString()
             textSize = 15f
             gravity = Gravity.CENTER
@@ -181,7 +181,7 @@ class OverlayService : Service() {
         val summary = TextView(this).apply {
             tag = "summary"
             text = buildSummary(
-                SnifferRepository.resources.value.filter {
+                SnifferRepository.preferredResources.value.filter {
                     val sessionId = SessionStore.externalIdOrDefault()
                     sessionId == 0L || it.sessionId == sessionId
                 }
