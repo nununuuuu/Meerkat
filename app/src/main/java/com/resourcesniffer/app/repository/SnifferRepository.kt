@@ -61,6 +61,7 @@ object SnifferRepository {
                 sessionId = resource.sessionId,
                 detectedAt = maxOf(old.detectedAt, resource.detectedAt),
                 mimeType = preferred.mimeType ?: secondary.mimeType,
+                fileName = resource.fileName ?: old.fileName,
                 contentLength = maxOfNullable(old.contentLength, resource.contentLength),
                 referer = preferred.referer ?: secondary.referer,
                 userAgent = preferred.userAgent ?: secondary.userAgent,
@@ -169,6 +170,7 @@ object SnifferRepository {
                     put("host", resource.host)
                     put("mimeType", resource.mimeType)
                     put("extension", resource.extension)
+                    put("fileName", resource.fileName)
                     put("contentLength", resource.contentLength)
                     put("type", resource.type.name)
                     put("streamType", resource.streamType?.name)
@@ -220,6 +222,7 @@ object SnifferRepository {
                             host = item.optString("host", "未知來源"),
                             mimeType = item.optString("mimeType").takeIf { it.isNotBlank() && it != "null" },
                             extension = item.optString("extension").takeIf { it.isNotBlank() && it != "null" },
+                            fileName = item.optString("fileName").takeIf { it.isNotBlank() && it != "null" },
                             contentLength = if (item.isNull("contentLength")) null else item.optLong("contentLength"),
                             type = runCatching { ResourceType.valueOf(item.getString("type")) }.getOrDefault(ResourceType.OTHER),
                             streamType = item.optString("streamType").takeIf { it.isNotBlank() && it != "null" }
