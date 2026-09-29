@@ -24,6 +24,7 @@ object DownloadHelper {
         resource: Resource,
         quality: DownloadQuality = DownloadQuality.HIGH,
     ) {
+        if (resource.drmDetected == true) error("此串流偵測到 DRM/受保護內容，Meerkat 不會嘗試解密")
         val url = resource.finalUrl ?: resource.url ?: error("缺少資源網址")
         val cookie = resource.cookie ?: CookieManager.getInstance().getCookie(url)
         val record = DownloadRecord(
