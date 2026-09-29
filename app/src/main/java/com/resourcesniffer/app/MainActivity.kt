@@ -68,6 +68,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import com.resourcesniffer.app.core.InstalledApp
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceType
@@ -438,8 +440,7 @@ private class BrowserCaptureBridge(
         private const val MAX_BLOB_BYTES = 512L * 1024 * 1024
     }
 }
-private fun installBrowserCapture(webView: WebView) {
-    val script = """
+private fun browserCaptureScript(): String = """
         (function() {
           if (window.__meerkatCaptureInstalled) return;
           window.__meerkatCaptureInstalled = true;
@@ -661,7 +662,9 @@ private fun installBrowserCapture(webView: WebView) {
           } catch (_) {}
         })();
     """.trimIndent()
-    webView.evaluateJavascript(script, null)
+
+private fun installBrowserCapture(webView: WebView) {
+    webView.evaluateJavascript(browserCaptureScript(), null)
 }
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -805,6 +808,13 @@ private fun BrowserPane(
                         BrowserCaptureBridge(ctx, viewModel, settings.userAgentString),
                         "MeerkatCapture",
                     )
+                    if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                        WebViewCompat.addDocumentStartJavaScript(
+                            this,
+                            browserCaptureScript(),
+                            setOf("*"),
+                        )
+                    }
 
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
