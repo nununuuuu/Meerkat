@@ -121,7 +121,8 @@ object ResourceValidator {
                 ?.substringAfterLast('.', "")
                 ?.lowercase()
                 ?.takeIf { it.isNotBlank() }
-                ?: ResourceClassifier.extensionFromUrl(finalUrl).ifBlank { resource.extension }
+                ?: ResourceClassifier.extensionFromUrl(finalUrl).takeIf { it.isNotBlank() }
+                ?: resource.extension
 
             resource.copy(
                 finalUrl = finalUrl,
