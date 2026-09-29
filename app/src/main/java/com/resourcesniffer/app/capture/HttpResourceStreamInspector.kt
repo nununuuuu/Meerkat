@@ -4,6 +4,7 @@ import android.net.Uri
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceClassifier
 import com.resourcesniffer.app.core.ResourceType
+import com.resourcesniffer.app.core.ResourceValidator
 import com.resourcesniffer.app.core.StreamType
 import com.resourcesniffer.app.repository.SnifferRepository
 import com.resourcesniffer.app.repository.SessionStore
@@ -620,7 +621,10 @@ class HttpResourceStreamInspector(
         }
 
         val classification = ResourceClassifier.classify(classificationUrl, mime)
-        if (classification.type == ResourceType.OTHER) return null
+        val normalizedMime = ResourceClassifier.normalizeMime(mime)
+        val probeUnknown = classification.type == ResourceType.OTHER &&
+            (normalizedMime == "application/octet-stream" || !fileName.isNullOrBlank())
+        if (classification.type == ResourceType.OTHER && !probeUnknown) return null
         if (isLikelySegment(request.url, classification.type)) return null
 
         val uri = runCatching { Uri.parse(request.url) }.getOrNull()
@@ -648,6 +652,9 @@ class HttpResourceStreamInspector(
             cookie = request.cookie,
         )
         SnifferRepository.add(resource)
+        ResourceValidator.validate(resource) { validated ->
+            SnifferRepository.add(validated)
+        }
         return resource
     }
 
