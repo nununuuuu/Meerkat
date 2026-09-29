@@ -62,6 +62,7 @@ object SnifferRepository {
                 detectedAt = maxOf(old.detectedAt, resource.detectedAt),
                 mimeType = preferred.mimeType ?: secondary.mimeType,
                 fileName = resource.fileName ?: old.fileName,
+                localCachePath = resource.localCachePath ?: old.localCachePath,
                 contentLength = maxOfNullable(old.contentLength, resource.contentLength),
                 referer = preferred.referer ?: secondary.referer,
                 userAgent = preferred.userAgent ?: secondary.userAgent,
@@ -171,6 +172,7 @@ object SnifferRepository {
                     put("mimeType", resource.mimeType)
                     put("extension", resource.extension)
                     put("fileName", resource.fileName)
+                    put("localCachePath", resource.localCachePath)
                     put("contentLength", resource.contentLength)
                     put("type", resource.type.name)
                     put("streamType", resource.streamType?.name)
@@ -223,6 +225,7 @@ object SnifferRepository {
                             mimeType = item.optString("mimeType").takeIf { it.isNotBlank() && it != "null" },
                             extension = item.optString("extension").takeIf { it.isNotBlank() && it != "null" },
                             fileName = item.optString("fileName").takeIf { it.isNotBlank() && it != "null" },
+                            localCachePath = item.optString("localCachePath").takeIf { it.isNotBlank() && it != "null" },
                             contentLength = if (item.isNull("contentLength")) null else item.optLong("contentLength"),
                             type = runCatching { ResourceType.valueOf(item.getString("type")) }.getOrDefault(ResourceType.OTHER),
                             streamType = item.optString("streamType").takeIf { it.isNotBlank() && it != "null" }
