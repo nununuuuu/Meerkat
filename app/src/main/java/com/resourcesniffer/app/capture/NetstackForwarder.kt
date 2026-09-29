@@ -205,13 +205,9 @@ class NetstackForwarder(
         }
     }
     private fun relayUdp(dstIp: String, dstPort: Int, conn: UDPConn) {
-        // Deep capture cannot inspect QUIC/HTTP3 payloads. Dropping UDP/443
-        // makes normal clients retry over TCP/TLS where the local proxy can
-        // negotiate HTTP/1.1 and inspect resource responses.
-        if (localProxyPort != null && dstPort == 443) {
-            runCatching { conn.close() }
-            return
-        }
+        // Compatibility first: never black-hole UDP/443. Apps that prefer
+        // QUIC/HTTP3 must remain usable even when Meerkat cannot decrypt it.
+        // Such traffic is passed through rather than inspected.
         val socket = DatagramSocket(null)
         openSockets += socket
         try {
