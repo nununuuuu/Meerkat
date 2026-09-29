@@ -32,6 +32,9 @@ class HlsDownloadService : Service() {
         private const val CHANNEL_ID = "hls_download"
         private const val NOTIFICATION_ID = 2101
         private const val MAX_MASTER_DEPTH = 4
+        private const val LIVE_MAX_RECORD_MS = 6L * 60L * 60L * 1000L
+        private const val LIVE_MIN_REFRESH_MS = 1_000L
+        private const val LIVE_MAX_REFRESH_MS = 10_000L
         const val EXTRA_RECORD_ID = "record_id"
         const val EXTRA_URL = "url"
         const val EXTRA_COOKIE = "cookie"
@@ -83,15 +86,25 @@ class HlsDownloadService : Service() {
                 .onSuccess { localUri ->
                     if (recordId != null) {
                         DownloadRegistry.update(recordId) { old ->
-                            old.copy(
-                                state = DownloadState.COMPLETED,
-                                progress = 100,
-                                detail = "串流下載完成",
-                                localUri = localUri,
-                            )
+                            if (old.state == DownloadState.CANCELLED) {
+                                old.copy(
+                                    progress = null,
+                                    detail = "已停止直播錄製，已保留目前內容",
+                                    localUri = localUri,
+                                )
+                            } else {
+                                old.copy(
+                                    state = DownloadState.COMPLETED,
+                                    progress = 100,
+                                    detail = "串流下載完成",
+                                    localUri = localUri,
+                                )
+                            }
                         }
                     }
-                    notifyDone("串流下載完成")
+                    val cancelled = recordId != null &&
+                        DownloadRegistry.find(recordId)?.state == DownloadState.CANCELLED
+                    notifyDone(if (cancelled) "直播錄製已停止，內容已保留" else "串流下載完成")
                 }
                 .onFailure { error ->
                     if (recordId != null) {
@@ -129,14 +142,28 @@ class HlsDownloadService : Service() {
 
         val audioUrl = resolved.audio?.uri
         if (audioUrl.isNullOrBlank()) {
-            val localUri = writeSinglePlaylist(videoPlaylist, headers, recordId)
-            saveSubtitleSidecar(resolved.subtitle, headers, recordId)
+            val localUri = if (videoPlaylist.isLive) {
+                writeLiveSinglePlaylist(
+                    playlistUrl = videoPlaylistUrl,
+                    initialPlaylist = videoPlaylist,
+                    headers = headers,
+                    recordId = recordId,
+                )
+            } else {
+                writeSinglePlaylist(videoPlaylist, headers, recordId)
+            }
+            if (!isCancelled(recordId)) {
+                saveSubtitleSidecar(resolved.subtitle, headers, recordId)
+            }
             return localUri
         }
 
         val audioManifest = fetchText(audioUrl, headers)
         val audioPlaylist = parseMediaPlaylist(audioManifest, audioUrl)
         require(audioPlaylist.segments.isNotEmpty()) { "找不到可下載的 HLS 音訊分段" }
+        require(!videoPlaylist.isLive && !audioPlaylist.isLive) {
+            "此直播使用獨立音訊 playlist；需要同步雙軌時間軸，暫不以快照方式下載"
+        }
 
         val stamp = recordId ?: System.currentTimeMillis().toString()
         val videoTemp = File(cacheDir, "hls-" + stamp + "-video.bin")
@@ -170,6 +197,123 @@ class HlsDownloadService : Service() {
             muxed.delete()
         }
     }
+
+    private fun writeLiveSinglePlaylist(
+        playlistUrl: String,
+        initialPlaylist: Playlist,
+        headers: Map<String, String>,
+        recordId: String?,
+    ): String {
+        val extension = if (
+            initialPlaylist.segments.any { it.init != null || it.url.contains(".m4s", true) }
+        ) "mp4" else "ts"
+        val outputName = "Meerkat-live-" + System.currentTimeMillis() + "." + extension
+        val target = openOutput(outputName)
+        val seen = linkedSetOf<String>()
+        var lastInit: RangedResource? = null
+        var totalWritten = 0
+        var playlist = initialPlaylist
+        val startedAt = System.currentTimeMillis()
+
+        try {
+            target.stream.use { output ->
+                while (true) {
+                    val newSegments = playlist.segments.filter { segment ->
+                        val key = segmentIdentity(segment)
+                        if (key in seen) false else {
+                            seen += key
+                            true
+                        }
+                    }
+
+                    for (segment in newSegments) {
+                        if (isCancelled(recordId)) break
+
+                        segment.init?.let { init ->
+                            if (init != lastInit) {
+                                output.write(fetchBytes(init.url, headers, init.range))
+                                lastInit = init
+                            }
+                        }
+
+                        var bytes = fetchBytes(segment.url, headers, segment.range)
+                        val key = segment.key
+                        if (key != null && key.method.equals("AES-128", true)) {
+                            val keyBytes = fetchBytes(key.uri, headers)
+                            require(keyBytes.size >= 16) { "HLS 金鑰長度無效" }
+                            val iv = key.iv ?: sequenceIv(segment.sequence)
+                            bytes = decryptAes128(bytes, keyBytes.copyOf(16), iv)
+                        }
+
+                        output.write(bytes)
+                        output.flush()
+                        totalWritten++
+
+                        recordId?.let { id ->
+                            DownloadRegistry.update(id) { old ->
+                                if (old.state == DownloadState.CANCELLED) old
+                                else old.copy(
+                                    state = DownloadState.DOWNLOADING,
+                                    progress = null,
+                                    detail = "直播錄製中 · 已保存 " + totalWritten + " 分段",
+                                )
+                            }
+                        }
+                        updateLiveNotification(totalWritten)
+                    }
+
+                    if (isCancelled(recordId)) break
+                    if (playlist.endList) break
+                    if (System.currentTimeMillis() - startedAt >= LIVE_MAX_RECORD_MS) {
+                        recordId?.let { id ->
+                            DownloadRegistry.update(id) { old ->
+                                old.copy(detail = "已達直播錄製安全上限，正在保存")
+                            }
+                        }
+                        break
+                    }
+
+                    val refreshMs = ((playlist.targetDurationSeconds ?: 4.0) * 500.0)
+                        .toLong()
+                        .coerceIn(LIVE_MIN_REFRESH_MS, LIVE_MAX_REFRESH_MS)
+                    Thread.sleep(refreshMs)
+
+                    if (isCancelled(recordId)) break
+                    val manifest = fetchText(playlistUrl, headers)
+                    playlist = parseMediaPlaylist(manifest, playlistUrl)
+                    require(playlist.segments.isNotEmpty() || playlist.endList) {
+                        "直播 playlist 暫時沒有可下載分段"
+                    }
+                }
+                output.flush()
+            }
+
+            require(totalWritten > 0) { "直播期間沒有取得可保存的 HLS 分段" }
+            publishOutput(target.uri)
+            return target.uri.toString()
+        } catch (error: Throwable) {
+            runCatching { target.stream.close() }
+            if (totalWritten > 0 && isCancelled(recordId)) {
+                runCatching { publishOutput(target.uri) }
+                return target.uri.toString()
+            }
+            runCatching { contentResolver.delete(target.uri, null, null) }
+            throw error
+        }
+    }
+
+    private fun segmentIdentity(segment: Segment): String =
+        buildString {
+            append(segment.sequence)
+            append('|')
+            append(segment.url)
+            segment.range?.let {
+                append('|')
+                append(it.start)
+                append(':')
+                append(it.length)
+            }
+        }
 
     private fun writeSinglePlaylist(
         playlist: Playlist,
@@ -248,10 +392,11 @@ class HlsDownloadService : Service() {
         output.flush()
     }
 
+    private fun isCancelled(recordId: String?): Boolean =
+        recordId != null && DownloadRegistry.find(recordId)?.state == DownloadState.CANCELLED
+
     private fun ensureNotCancelled(recordId: String?) {
-        if (recordId != null && DownloadRegistry.find(recordId)?.state == DownloadState.CANCELLED) {
-            error("下載已取消")
-        }
+        if (isCancelled(recordId)) error("下載已取消")
     }
 
     private data class MasterVariant(
@@ -416,10 +561,20 @@ class HlsDownloadService : Service() {
         val range: ByteRange?,
         val init: RangedResource?,
     )
-    private data class Playlist(val segments: List<Segment>)
+    private data class Playlist(
+        val segments: List<Segment>,
+        val mediaSequence: Long,
+        val targetDurationSeconds: Double?,
+        val endList: Boolean,
+    ) {
+        val isLive: Boolean get() = !endList
+    }
 
     private fun parseMediaPlaylist(manifest: String, baseUrl: String): Playlist {
         var sequence = 0L
+        var mediaSequence = 0L
+        var targetDurationSeconds: Double? = null
+        var endList = false
         var currentKey: HlsKey? = null
         var currentInit: RangedResource? = null
         var pendingRangeSpec: String? = null
@@ -429,7 +584,19 @@ class HlsDownloadService : Service() {
         manifest.lineSequence().map { it.trim() }.forEach { line ->
             when {
                 line.startsWith("#EXT-X-MEDIA-SEQUENCE:", true) -> {
-                    sequence = line.substringAfter(':').trim().toLongOrNull() ?: sequence
+                    val parsed = line.substringAfter(':').trim().toLongOrNull()
+                    if (parsed != null) {
+                        mediaSequence = parsed
+                        sequence = parsed
+                    }
+                }
+
+                line.startsWith("#EXT-X-TARGETDURATION:", true) -> {
+                    targetDurationSeconds = line.substringAfter(':').trim().toDoubleOrNull()
+                }
+
+                line.startsWith("#EXT-X-ENDLIST", true) -> {
+                    endList = true
                 }
 
                 line.startsWith("#EXT-X-MAP:", true) -> {
@@ -483,7 +650,12 @@ class HlsDownloadService : Service() {
                 }
             }
         }
-        return Playlist(segments)
+        return Playlist(
+            segments = segments,
+            mediaSequence = mediaSequence,
+            targetDurationSeconds = targetDurationSeconds,
+            endList = endList,
+        )
     }
 
     private fun parseByteRange(
@@ -782,6 +954,19 @@ class HlsDownloadService : Service() {
                 .setContentText("$done / $total 分段")
                 .setOngoing(true)
                 .setProgress(total, done, false)
+                .build()
+        )
+    }
+
+    private fun updateLiveNotification(segmentCount: Int) {
+        getSystemService(NotificationManager::class.java).notify(
+            NOTIFICATION_ID,
+            NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentTitle("正在錄製 HLS 直播")
+                .setContentText("已保存 " + segmentCount + " 分段")
+                .setOngoing(true)
+                .setProgress(0, 0, true)
                 .build()
         )
     }
