@@ -440,6 +440,8 @@ class HttpResourceStreamInspector(
             resource = resource.copy(
                 localCachePath = cached.absolutePath,
                 contentLength = resource.contentLength ?: cached.length(),
+                validationState = com.resourcesniffer.app.core.ValidationState.VERIFIED,
+                verifiedAt = System.currentTimeMillis(),
             )
             SnifferRepository.add(resource)
         }
@@ -772,8 +774,15 @@ class HttpResourceStreamInspector(
             cookie = request.cookie,
         )
         SnifferRepository.add(resource)
-        ResourceValidator.validate(resource) { validated ->
-            SnifferRepository.add(validated)
+        val responseAlreadyIdentifiesResource =
+            contentLength != null &&
+                contentLength > 0L &&
+                classification.type != ResourceType.OTHER &&
+                ResourceClassifier.normalizeMime(mime).isNotBlank()
+        if (!responseAlreadyIdentifiesResource) {
+            ResourceValidator.validate(resource) { validated ->
+                SnifferRepository.add(validated)
+            }
         }
         return resource
     }
