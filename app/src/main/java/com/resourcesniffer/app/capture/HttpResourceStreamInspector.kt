@@ -727,8 +727,8 @@ class HttpResourceStreamInspector(
         private val CRLF = "\r\n".toByteArray(Charsets.US_ASCII)
         private val METHODS = setOf("GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "PATCH")
         private val ABSOLUTE_URL = Regex("""https?://[^\s"'<>\\]+""", RegexOption.IGNORE_CASE)
-        private val QUOTED_MEDIA_PATH = Regex(
-            """["']([^"']+\.(?:m3u8|mpd|mp4|m4v|webm|mov|m4a|mp3|aac|flac|ogg|opus|jpg|jpeg|png|webp|gif|avif|heic|heif)(?:\?[^"']*)?)["']""",
+        private val QUOTED_RESOURCE_PATH = Regex(
+            """["\']([^"\']+\.(?:m3u8|mpd|mp4|m4v|webm|mkv|mov|avi|m4a|mp3|aac|flac|ogg|opus|wav|jpg|jpeg|png|webp|gif|avif|bmp|svg|heic|heif|pdf|epub|doc|docx|docm|dot|dotx|xls|xlsx|xlsm|xlsb|ppt|pptx|pptm|pps|ppsx|odt|ods|odp|pages|numbers|key|txt|csv|tsv|rtf|md|zip|rar|7z|tar|gz)(?:\?[^"\']*)?)["\']""",
             RegexOption.IGNORE_CASE,
         )
     }
