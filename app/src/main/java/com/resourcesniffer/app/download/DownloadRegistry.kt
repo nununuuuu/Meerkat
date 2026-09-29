@@ -75,6 +75,9 @@ object DownloadRegistry {
                     put("displayName", item.displayName)
                     put("mimeType", item.mimeType)
                     put("streamType", item.streamType?.name)
+                    put("cookie", item.cookie)
+                    put("referer", item.referer)
+                    put("userAgent", item.userAgent)
                     put("quality", item.quality.name)
                     put("state", item.state.name)
                     put("progress", item.progress)
@@ -109,9 +112,9 @@ object DownloadRegistry {
                             mimeType = nullableString(item, "mimeType"),
                             streamType = nullableString(item, "streamType")
                                 ?.let { runCatching { StreamType.valueOf(it) }.getOrNull() },
-                            cookie = null,
-                            referer = null,
-                            userAgent = null,
+                            cookie = nullableString(item, "cookie"),
+                            referer = nullableString(item, "referer"),
+                            userAgent = nullableString(item, "userAgent"),
                             quality = nullableString(item, "quality")
                                 ?.let { runCatching { DownloadQuality.valueOf(it) }.getOrNull() }
                                 ?: DownloadQuality.HIGH,
