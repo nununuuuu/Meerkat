@@ -7,7 +7,11 @@ import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.core.StreamType
 import com.resourcesniffer.app.repository.SnifferRepository
 import com.resourcesniffer.app.repository.SessionStore
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.util.zip.GZIPInputStream
+import java.util.zip.InflaterInputStream
+import org.brotli.dec.BrotliInputStream
 import java.net.URI
 import java.net.URLDecoder
 import java.util.ArrayDeque
@@ -37,6 +41,8 @@ class HttpResourceStreamInspector(
         val request: PendingRequest,
         val resource: Resource?,
         val streamType: StreamType?,
+        val contentType: String?,
+        val contentEncoding: String?,
         val body: ByteArrayOutputStream? = null,
     )
 
@@ -204,6 +210,7 @@ class HttpResourceStreamInspector(
                     }
 
                     val mime = headerValue(lines, "Content-Type")
+                    val contentEncoding = headerValue(lines, "Content-Encoding")
                     val contentLength = headerValue(lines, "Content-Length")?.toLongOrNull()?.takeIf { it >= 0L }
                     val disposition = headerValue(lines, "Content-Disposition")
                     val fileName = parseFileName(disposition)
@@ -218,11 +225,14 @@ class HttpResourceStreamInspector(
 
                     val resource = publishIfResource(request, mime, contentLength, fileName)
                     val streamType = resource?.streamType
+                    val shouldInspectBody = streamType != null || isDeepSearchTextMime(mime)
                     responseContext = ResponseContext(
                         request = request,
                         resource = resource,
                         streamType = streamType,
-                        body = if (streamType != null) ByteArrayOutputStream() else null,
+                        contentType = mime,
+                        contentEncoding = contentEncoding,
+                        body = if (shouldInspectBody) ByteArrayOutputStream() else null,
                     )
 
                     val noBody = request.method.equals("HEAD", true) ||
@@ -327,8 +337,8 @@ class HttpResourceStreamInspector(
 
     private fun captureResponseBody(bytes: ByteArray) {
         val out = responseContext?.body ?: return
-        if (out.size() >= MAX_MANIFEST_BYTES) return
-        val writable = minOf(bytes.size, MAX_MANIFEST_BYTES - out.size())
+        if (out.size() >= MAX_INSPECT_BODY_BYTES) return
+        val writable = minOf(bytes.size, MAX_INSPECT_BODY_BYTES - out.size())
         out.write(bytes, 0, writable)
     }
 
@@ -339,19 +349,68 @@ class HttpResourceStreamInspector(
         val body = context.body?.toByteArray() ?: return
         if (body.isEmpty()) return
 
-        val text = decodeManifest(body)
+        val decoded = decodeContent(body, context.contentEncoding) ?: return
+        val text = decoded.toString(Charsets.UTF_8)
+            .removePrefix("\uFEFF")
+            .take(MAX_INSPECT_BODY_CHARS)
+
         val enriched = when (context.streamType) {
             StreamType.HLS -> enrichHls(resource, text)
             StreamType.DASH -> enrichDash(resource, text)
             else -> resource
         }
         if (enriched != resource) SnifferRepository.add(enriched)
+
+        deepSearch(context.request, text)
     }
 
-    private fun decodeManifest(bytes: ByteArray): String {
-        return bytes.toString(Charsets.UTF_8)
-            .removePrefix("\uFEFF")
-            .take(MAX_MANIFEST_CHARS)
+    private fun decodeContent(bytes: ByteArray, encoding: String?): ByteArray? = runCatching {
+        when (encoding?.lowercase()?.trim()) {
+            null, "", "identity" -> bytes
+            "gzip", "x-gzip" -> GZIPInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
+            "deflate" -> InflaterInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
+            "br" -> BrotliInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
+            else -> bytes
+        }
+    }.getOrNull()
+
+    private fun isDeepSearchTextMime(mime: String?): Boolean {
+        val normalized = mime?.substringBefore(';')?.trim()?.lowercase().orEmpty()
+        return normalized.startsWith("text/") ||
+            normalized == "application/json" ||
+            normalized.endsWith("+json") ||
+            normalized == "application/javascript" ||
+            normalized == "application/x-javascript" ||
+            normalized == "application/xml" ||
+            normalized.endsWith("+xml")
+    }
+
+    private fun deepSearch(request: PendingRequest, text: String) {
+        if (text.isBlank()) return
+        val normalized = text
+            .replace("\\/", "/")
+            .replace("\\u002F", "/")
+            .replace("\\u002f", "/")
+            .replace("&amp;", "&")
+
+        val candidates = LinkedHashSet<String>()
+
+        ABSOLUTE_URL.findAll(normalized).take(MAX_DEEP_SEARCH_RESULTS).forEach { match ->
+            candidates += match.value.trimEnd(')', ']', '}', ',', ';', '\'', '"')
+        }
+
+        QUOTED_MEDIA_PATH.findAll(normalized).take(MAX_DEEP_SEARCH_RESULTS).forEach { match ->
+            val raw = match.groupValues.getOrNull(1).orEmpty()
+            if (raw.isBlank()) return@forEach
+            val resolved = runCatching { URI(request.url).resolve(raw).toString() }.getOrNull()
+            if (!resolved.isNullOrBlank()) candidates += resolved
+        }
+
+        candidates.asSequence()
+            .take(MAX_DEEP_SEARCH_RESULTS)
+            .forEach { candidate ->
+                publishIfResource(request.copy(url = candidate), null, null, null)
+            }
     }
 
     private fun enrichHls(resource: Resource, manifest: String): Resource {
@@ -445,6 +504,7 @@ class HttpResourceStreamInspector(
 
         val classification = ResourceClassifier.classify(classificationUrl, mime)
         if (classification.type == ResourceType.OTHER) return null
+        if (isLikelySegment(request.url, classification.type)) return null
 
         val uri = runCatching { Uri.parse(request.url) }.getOrNull()
         val extension = fileName
@@ -471,6 +531,26 @@ class HttpResourceStreamInspector(
         )
         SnifferRepository.add(resource)
         return resource
+    }
+
+    private fun isLikelySegment(url: String, type: ResourceType): Boolean {
+        if (type != ResourceType.VIDEO && type != ResourceType.AUDIO) return false
+        val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return false
+        val path = uri.path.orEmpty().lowercase()
+        val file = uri.lastPathSegment.orEmpty().lowercase()
+        val ext = ResourceClassifier.extensionFromUrl(url)
+
+        if (ext in setOf("m4s", "cmfv", "cmfa")) return true
+        if (ext == "ts") {
+            val stem = file.substringBeforeLast('.', file)
+            if (stem.all { it.isDigit() } || path.contains("/segment") || path.contains("/segments/") || path.contains("/chunk")) {
+                return true
+            }
+        }
+        if (path.contains("/segment/") || path.contains("/segments/") || path.contains("/chunk/") || path.contains("/fragments/")) {
+            return true
+        }
+        return false
     }
 
     private fun headerValue(lines: List<String>, name: String): String? =
@@ -551,10 +631,16 @@ class HttpResourceStreamInspector(
     companion object {
         private const val MAX_HEADER_BUFFER = 128 * 1024
         private const val MAX_PENDING = 128
-        private const val MAX_MANIFEST_BYTES = 2 * 1024 * 1024
-        private const val MAX_MANIFEST_CHARS = 2 * 1024 * 1024
+        private const val MAX_INSPECT_BODY_BYTES = 4 * 1024 * 1024
+        private const val MAX_INSPECT_BODY_CHARS = 4 * 1024 * 1024
+        private const val MAX_DEEP_SEARCH_RESULTS = 256
         private val HEADER_END = "\r\n\r\n".toByteArray(Charsets.US_ASCII)
         private val CRLF = "\r\n".toByteArray(Charsets.US_ASCII)
         private val METHODS = setOf("GET", "POST", "HEAD", "PUT", "DELETE", "OPTIONS", "PATCH")
+        private val ABSOLUTE_URL = Regex("""https?://[^\s"'<>\\]+""", RegexOption.IGNORE_CASE)
+        private val QUOTED_MEDIA_PATH = Regex(
+            """["']([^"']+\.(?:m3u8|mpd|mp4|m4v|webm|mov|m4a|mp3|aac|flac|ogg|opus|jpg|jpeg|png|webp|gif|avif|heic|heif)(?:\?[^"']*)?)["']""",
+            RegexOption.IGNORE_CASE,
+        )
     }
 }
