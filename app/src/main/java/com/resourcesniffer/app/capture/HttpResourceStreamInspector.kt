@@ -399,7 +399,7 @@ class HttpResourceStreamInspector(
             candidates += match.value.trimEnd(')', ']', '}', ',', ';', '\'', '"')
         }
 
-        QUOTED_MEDIA_PATH.findAll(normalized).take(MAX_DEEP_SEARCH_RESULTS).forEach { match ->
+        QUOTED_RESOURCE_PATH.findAll(normalized).take(MAX_DEEP_SEARCH_RESULTS).forEach { match ->
             val raw = match.groupValues.getOrNull(1).orEmpty()
             if (raw.isBlank()) return@forEach
             val resolved = runCatching { URI(request.url).resolve(raw).toString() }.getOrNull()
