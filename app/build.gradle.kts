@@ -15,8 +15,8 @@ android {
         applicationId = "com.resourcesniffer.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 9
-        versionName = "0.5.0-beta4"
+        versionCode = 10
+        versionName = "0.6.0-beta1"
     }
 
     buildFeatures {
