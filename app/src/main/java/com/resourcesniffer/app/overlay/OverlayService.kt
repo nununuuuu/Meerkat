@@ -42,8 +42,10 @@ class OverlayService : Service() {
     private val updateCount = object : Runnable {
         override fun run() {
             val sessionId = SessionStore.idOrDefault()
-            val items = SnifferRepository.resources.value.filter {
-                sessionId == 0L || it.sessionId == sessionId
+            val items = if (sessionId == 0L) {
+                emptyList()
+            } else {
+                SnifferRepository.resources.value.filter { it.sessionId == sessionId }
             }
             bubble?.text = items.size.toString()
             panel?.findViewWithTag<TextView>("summary")?.text = buildSummary(items)
@@ -92,9 +94,9 @@ class OverlayService : Service() {
         val density = resources.displayMetrics.density
         val size = (58 * density).toInt()
         val view = TextView(this).apply {
-            text = SnifferRepository.resources.value.count {
-                val sessionId = SessionStore.idOrDefault()
-                sessionId == 0L || it.sessionId == sessionId
+            text = SessionStore.idOrDefault().let { sessionId ->
+                if (sessionId == 0L) 0
+                else SnifferRepository.resources.value.count { it.sessionId == sessionId }
             }.toString()
             textSize = 15f
             gravity = Gravity.CENTER
