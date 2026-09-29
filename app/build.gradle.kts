@@ -50,6 +50,7 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.7")
     implementation("org.bouncycastle:bcprov-jdk18on:1.82")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.82")
+    implementation("org.brotli:dec:0.1.2")
     implementation(files("libs/netstack.aar"))
 
     debugImplementation("androidx.compose.ui:ui-tooling")
