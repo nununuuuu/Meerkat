@@ -16,14 +16,34 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLDecoder
 import java.util.concurrent.Executors
-import kotlin.math.min
+import java.util.concurrent.atomic.AtomicLong
 
 class DirectHttpDownloadService : Service() {
 
     companion object {
         private const val CHANNEL_ID = "direct_http_download"
         private const val MAX_ATTEMPTS = 3
+        private const val PARALLEL_THRESHOLD = 16L * 1024 * 1024
+        private const val IO_BUFFER = 128 * 1024
         const val EXTRA_RECORD_ID = "record_id"
+    }
+
+    private data class Probe(
+        val totalLength: Long?,
+        val supportsRanges: Boolean,
+        val etag: String?,
+        val lastModified: String?,
+        val mimeType: String?,
+        val fileName: String?,
+    )
+
+    private data class RangePart(
+        val index: Int,
+        val start: Long,
+        val end: Long,
+        val file: File,
+    ) {
+        val length: Long get() = end - start + 1L
     }
 
     private val executor = Executors.newFixedThreadPool(2)
@@ -64,29 +84,31 @@ class DirectHttpDownloadService : Service() {
         )
 
         executor.execute {
-            val result = runCatching { download(recordId) }
-            result.onSuccess { localUri ->
-                DownloadRegistry.update(recordId) { current ->
-                    current.copy(
-                        state = DownloadState.COMPLETED,
-                        progress = 100,
-                        detail = "下載完成",
-                        localUri = localUri,
-                    )
+            runCatching { download(recordId) }
+                .onSuccess { localUri ->
+                    DownloadRegistry.update(recordId) { current ->
+                        current.copy(
+                            state = DownloadState.COMPLETED,
+                            progress = 100,
+                            detail = "下載完成",
+                            localUri = localUri,
+                        )
+                    }
+                    notifyFinished(notificationId, record.displayName, "下載完成")
                 }
-                notifyFinished(notificationId, record.displayName, "下載完成")
-            }.onFailure { error ->
-                DownloadRegistry.update(recordId) { current ->
-                    if (current.state == DownloadState.CANCELLED) current
-                    else current.copy(
-                        state = DownloadState.FAILED,
-                        detail = error.message ?: "下載失敗",
-                    )
+                .onFailure { error ->
+                    DownloadRegistry.update(recordId) { current ->
+                        if (current.state == DownloadState.CANCELLED) current
+                        else current.copy(
+                            state = DownloadState.FAILED,
+                            detail = error.message ?: "下載失敗",
+                        )
+                    }
+                    if (DownloadRegistry.find(recordId)?.state != DownloadState.CANCELLED) {
+                        notifyFinished(notificationId, record.displayName, "下載失敗")
+                    }
                 }
-                if (DownloadRegistry.find(recordId)?.state != DownloadState.CANCELLED) {
-                    notifyFinished(notificationId, record.displayName, "下載失敗")
-                }
-            }
+
             stopForeground(STOP_FOREGROUND_DETACH)
             stopSelf(startId)
         }
@@ -99,17 +121,48 @@ class DirectHttpDownloadService : Service() {
         val dir = File(cacheDir, "direct-downloads").apply { mkdirs() }
         val temp = File(dir, recordId + ".part")
 
+        if (!temp.exists() || temp.length() == 0L) {
+            val probe = probe(initial)
+            updateMetadata(recordId, probe)
+            val refreshed = DownloadRegistry.find(recordId) ?: initial
+
+            if (
+                probe.supportsRanges &&
+                probe.totalLength != null &&
+                probe.totalLength >= PARALLEL_THRESHOLD
+            ) {
+                val parallelResult = runCatching {
+                    parallelDownload(recordId, refreshed, dir, temp, probe)
+                }
+                if (parallelResult.isSuccess) {
+                    return parallelResult.getOrThrow()
+                }
+                if (DownloadRegistry.find(recordId)?.state == DownloadState.CANCELLED) {
+                    throw parallelResult.exceptionOrNull() ?: IllegalStateException("下載已取消")
+                }
+                cleanupParallelParts(dir, recordId)
+                temp.delete()
+                DownloadRegistry.update(recordId) { current ->
+                    current.copy(
+                        progress = null,
+                        detail = "並行下載失敗，改用單線續傳",
+                    )
+                }
+            }
+        }
+
         var lastError: Throwable? = null
         for (attempt in 1..MAX_ATTEMPTS) {
             ensureActive(recordId)
+            val current = DownloadRegistry.find(recordId) ?: initial
             try {
-                return downloadAttempt(recordId, initial, temp, attempt)
+                return sequentialAttempt(recordId, current, temp, attempt)
             } catch (error: Throwable) {
                 if (DownloadRegistry.find(recordId)?.state == DownloadState.CANCELLED) throw error
                 lastError = error
                 if (attempt < MAX_ATTEMPTS) {
-                    DownloadRegistry.update(recordId) { current ->
-                        current.copy(detail = "連線中斷，準備重試 " + (attempt + 1) + "/" + MAX_ATTEMPTS)
+                    DownloadRegistry.update(recordId) { item ->
+                        item.copy(detail = "連線中斷，準備重試 " + (attempt + 1) + "/" + MAX_ATTEMPTS)
                     }
                     Thread.sleep(800L * attempt)
                 }
@@ -118,14 +171,64 @@ class DirectHttpDownloadService : Service() {
         throw lastError ?: IllegalStateException("下載失敗")
     }
 
-    private fun downloadAttempt(
+    private fun probe(record: DownloadRecord): Probe {
+        val connection = openConnection(
+            record = record,
+            rangeStart = 0L,
+            rangeEnd = 0L,
+            ifRange = null,
+        )
+        return try {
+            val code = connection.responseCode
+            val rangeTotal = connection.getHeaderField("Content-Range")
+                ?.substringAfterLast('/')
+                ?.toLongOrNull()
+            val total = when {
+                code == HttpURLConnection.HTTP_PARTIAL && rangeTotal != null -> rangeTotal
+                code in 200..299 && connection.contentLengthLong > 0L -> connection.contentLengthLong
+                code == 416 && rangeTotal != null -> rangeTotal
+                else -> record.expectedLength
+            }
+            Probe(
+                totalLength = total,
+                supportsRanges = code == HttpURLConnection.HTTP_PARTIAL ||
+                    connection.getHeaderField("Accept-Ranges")?.contains("bytes", true) == true,
+                etag = connection.getHeaderField("ETag") ?: record.etag,
+                lastModified = connection.getHeaderField("Last-Modified") ?: record.lastModified,
+                mimeType = connection.contentType?.substringBefore(';')?.trim() ?: record.mimeType,
+                fileName = parseDispositionFileName(connection.getHeaderField("Content-Disposition")),
+            )
+        } finally {
+            runCatching { connection.inputStream.close() }
+            connection.disconnect()
+        }
+    }
+
+    private fun updateMetadata(recordId: String, probe: Probe) {
+        DownloadRegistry.update(recordId) { current ->
+            current.copy(
+                displayName = probe.fileName?.let(::sanitizeFileName) ?: current.displayName,
+                mimeType = probe.mimeType ?: current.mimeType,
+                expectedLength = probe.totalLength ?: current.expectedLength,
+                etag = probe.etag ?: current.etag,
+                lastModified = probe.lastModified ?: current.lastModified,
+            )
+        }
+    }
+
+    private fun sequentialAttempt(
         recordId: String,
         record: DownloadRecord,
         temp: File,
         attempt: Int,
     ): String {
         var resumeFrom = temp.takeIf { it.exists() }?.length() ?: 0L
-        var connection = openConnection(record, resumeFrom)
+        var connection = openConnection(
+            record = record,
+            rangeStart = resumeFrom.takeIf { it > 0L },
+            rangeEnd = null,
+            ifRange = resumeValidator(record).takeIf { resumeFrom > 0L },
+        )
         var code = connection.responseCode
 
         if (code == 416) {
@@ -138,7 +241,7 @@ class DirectHttpDownloadService : Service() {
             }
             temp.delete()
             resumeFrom = 0L
-            connection = openConnection(record, 0L)
+            connection = openConnection(record, null, null, null)
             code = connection.responseCode
         }
 
@@ -147,7 +250,24 @@ class DirectHttpDownloadService : Service() {
             error("HTTP " + code)
         }
 
+        val responseEtag = connection.getHeaderField("ETag")
+        val responseLastModified = connection.getHeaderField("Last-Modified")
         val append = resumeFrom > 0L && code == HttpURLConnection.HTTP_PARTIAL
+
+        if (append && !validatorsCompatible(record, responseEtag, responseLastModified)) {
+            connection.disconnect()
+            temp.delete()
+            DownloadRegistry.update(recordId) { current ->
+                current.copy(
+                    etag = responseEtag ?: current.etag,
+                    lastModified = responseLastModified ?: current.lastModified,
+                    progress = null,
+                    detail = "遠端檔案已更新，重新下載",
+                )
+            }
+            error("遠端檔案版本已變更")
+        }
+
         if (resumeFrom > 0L && !append) {
             temp.delete()
             resumeFrom = 0L
@@ -160,20 +280,16 @@ class DirectHttpDownloadService : Service() {
                 ?.substringAfterLast('/')
                 ?.toLongOrNull()
             connection.contentLengthLong > 0L -> connection.contentLengthLong
-            else -> null
-        }
-
-        if (!dispositionName.isNullOrBlank() || !responseMime.isNullOrBlank()) {
-            DownloadRegistry.update(recordId) { current ->
-                current.copy(
-                    displayName = dispositionName?.let(::sanitizeFileName) ?: current.displayName,
-                    mimeType = responseMime ?: current.mimeType,
-                )
-            }
+            else -> record.expectedLength
         }
 
         DownloadRegistry.update(recordId) { current ->
             current.copy(
+                displayName = dispositionName?.let(::sanitizeFileName) ?: current.displayName,
+                mimeType = responseMime ?: current.mimeType,
+                expectedLength = expectedTotal ?: current.expectedLength,
+                etag = responseEtag ?: current.etag,
+                lastModified = responseLastModified ?: current.lastModified,
                 state = DownloadState.DOWNLOADING,
                 detail = if (resumeFrom > 0L) "續傳中（第 " + attempt + " 次）" else "下載中",
             )
@@ -181,8 +297,9 @@ class DirectHttpDownloadService : Service() {
 
         FileOutputStream(temp, append).use { output ->
             connection.inputStream.use { input ->
-                val buffer = ByteArray(128 * 1024)
+                val buffer = ByteArray(IO_BUFFER)
                 var downloaded = resumeFrom
+                var lastProgressAt = 0L
                 while (true) {
                     ensureActive(recordId)
                     val read = input.read(buffer)
@@ -190,17 +307,18 @@ class DirectHttpDownloadService : Service() {
                     if (read == 0) continue
                     output.write(buffer, 0, read)
                     downloaded += read
-                    expectedTotal?.takeIf { it > 0L }?.let { total ->
-                        val progress = ((downloaded * 100L) / total)
-                            .toInt()
-                            .coerceIn(0, 100)
-                        DownloadRegistry.update(recordId) { current ->
-                            current.copy(
-                                state = DownloadState.DOWNLOADING,
-                                progress = progress,
-                                detail = if (resumeFrom > 0L) "續傳中" else "下載中",
+
+                    val now = System.currentTimeMillis()
+                    if (now - lastProgressAt >= 350L) {
+                        expectedTotal?.takeIf { it > 0L }?.let { total ->
+                            updateProgress(
+                                recordId,
+                                downloaded,
+                                total,
+                                if (resumeFrom > 0L) "續傳中" else "下載中",
                             )
                         }
+                        lastProgressAt = now
                     }
                 }
                 output.fd.sync()
@@ -213,16 +331,222 @@ class DirectHttpDownloadService : Service() {
         }
 
         val current = DownloadRegistry.find(recordId) ?: record
-        return publish(
+        return publish(recordId, current, temp, dispositionName, responseMime)
+    }
+
+    private fun parallelDownload(
+        recordId: String,
+        record: DownloadRecord,
+        dir: File,
+        temp: File,
+        probe: Probe,
+    ): String {
+        val total = probe.totalLength ?: error("缺少檔案長度")
+        val partCount = when {
+            total >= 64L * 1024 * 1024 -> 4
+            total >= 32L * 1024 * 1024 -> 3
+            else -> 2
+        }
+        val chunk = (total + partCount - 1L) / partCount
+
+        val parts = (0 until partCount).map { index ->
+            val start = index * chunk
+            val end = minOf(total - 1L, start + chunk - 1L)
+            RangePart(
+                index = index,
+                start = start,
+                end = end,
+                file = File(dir, recordId + ".range." + index),
+            )
+        }.filter { it.start <= it.end }
+
+        parts.forEach { part ->
+            if (part.file.exists() && part.file.length() > part.length) {
+                part.file.delete()
+            }
+        }
+
+        val downloaded = AtomicLong(parts.sumOf { it.file.takeIf(File::exists)?.length() ?: 0L })
+        val lastProgressAt = AtomicLong(0L)
+        val pool = Executors.newFixedThreadPool(parts.size.coerceAtLeast(1))
+
+        DownloadRegistry.update(recordId) { current ->
+            current.copy(
+                state = DownloadState.DOWNLOADING,
+                expectedLength = total,
+                etag = probe.etag ?: current.etag,
+                lastModified = probe.lastModified ?: current.lastModified,
+                detail = "多線下載（" + parts.size + " 段）",
+            )
+        }
+
+        try {
+            val futures = parts.map { part ->
+                pool.submit<Unit> {
+                    downloadRangePart(
+                        recordId = recordId,
+                        record = DownloadRegistry.find(recordId) ?: record,
+                        part = part,
+                        total = total,
+                        downloaded = downloaded,
+                        lastProgressAt = lastProgressAt,
+                    )
+                }
+            }
+            futures.forEach { it.get() }
+        } finally {
+            pool.shutdownNow()
+        }
+
+        ensureActive(recordId)
+        parts.forEach { part ->
+            require(part.file.length() == part.length) {
+                "分段 " + part.index + " 長度不完整"
+            }
+        }
+
+        FileOutputStream(temp, false).use { output ->
+            parts.sortedBy { it.index }.forEach { part ->
+                part.file.inputStream().use { input ->
+                    input.copyTo(output, IO_BUFFER)
+                }
+            }
+            output.fd.sync()
+        }
+
+        require(temp.length() == total) {
+            "合併檔案長度不完整：" + temp.length() + " / " + total
+        }
+        parts.forEach { it.file.delete() }
+
+        val current = DownloadRegistry.find(recordId) ?: record
+        return publish(recordId, current, temp, probe.fileName, probe.mimeType)
+    }
+
+    private fun downloadRangePart(
+        recordId: String,
+        record: DownloadRecord,
+        part: RangePart,
+        total: Long,
+        downloaded: AtomicLong,
+        lastProgressAt: AtomicLong,
+    ) {
+        var lastError: Throwable? = null
+
+        for (attempt in 1..MAX_ATTEMPTS) {
+            ensureActive(recordId)
+            val existing = part.file.takeIf(File::exists)?.length() ?: 0L
+            if (existing == part.length) return
+            if (existing > part.length) part.file.delete()
+
+            val actualExisting = part.file.takeIf(File::exists)?.length() ?: 0L
+            val requestStart = part.start + actualExisting
+            var connection: HttpURLConnection? = null
+            try {
+                connection = openConnection(
+                    record = record,
+                    rangeStart = requestStart,
+                    rangeEnd = part.end,
+                    ifRange = resumeValidator(record),
+                )
+                val code = connection.responseCode
+                require(code == HttpURLConnection.HTTP_PARTIAL) {
+                    "伺服器停止支援 Range（HTTP " + code + "）"
+                }
+
+                val contentRange = connection.getHeaderField("Content-Range").orEmpty()
+                require(contentRange.startsWith("bytes " + requestStart + "-", true)) {
+                    "Range 回應位置不一致"
+                }
+                require(
+                    validatorsCompatible(
+                        record,
+                        connection.getHeaderField("ETag"),
+                        connection.getHeaderField("Last-Modified"),
+                    )
+                ) { "遠端檔案版本已變更" }
+
+                FileOutputStream(part.file, actualExisting > 0L).use { output ->
+                    connection.inputStream.use { input ->
+                        val buffer = ByteArray(IO_BUFFER)
+                        while (true) {
+                            ensureActive(recordId)
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            if (read == 0) continue
+                            output.write(buffer, 0, read)
+                            val currentDone = downloaded.addAndGet(read.toLong())
+                            maybeUpdateParallelProgress(
+                                recordId,
+                                currentDone,
+                                total,
+                                partCountText = null,
+                                lastProgressAt = lastProgressAt,
+                            )
+                        }
+                        output.fd.sync()
+                    }
+                }
+
+                require(part.file.length() == part.length) {
+                    "Range 分段長度不完整"
+                }
+                return
+            } catch (error: Throwable) {
+                lastError = error
+                if (DownloadRegistry.find(recordId)?.state == DownloadState.CANCELLED) throw error
+                if (attempt < MAX_ATTEMPTS) Thread.sleep(500L * attempt)
+            } finally {
+                connection?.disconnect()
+            }
+        }
+
+        throw lastError ?: IllegalStateException("Range 分段下載失敗")
+    }
+
+    private fun maybeUpdateParallelProgress(
+        recordId: String,
+        downloaded: Long,
+        total: Long,
+        partCountText: String?,
+        lastProgressAt: AtomicLong,
+    ) {
+        val now = System.currentTimeMillis()
+        val previous = lastProgressAt.get()
+        if (now - previous < 350L || !lastProgressAt.compareAndSet(previous, now)) return
+        updateProgress(
             recordId,
-            current,
-            temp,
-            dispositionName,
-            responseMime,
+            downloaded,
+            total,
+            partCountText ?: "多線下載中",
         )
     }
 
-    private fun openConnection(record: DownloadRecord, resumeFrom: Long): HttpURLConnection {
+    private fun updateProgress(recordId: String, downloaded: Long, total: Long, detail: String) {
+        val progress = ((downloaded * 100L) / total.coerceAtLeast(1L))
+            .toInt()
+            .coerceIn(0, 100)
+        DownloadRegistry.update(recordId) { current ->
+            current.copy(
+                state = DownloadState.DOWNLOADING,
+                progress = progress,
+                detail = detail,
+            )
+        }
+    }
+
+    private fun cleanupParallelParts(dir: File, recordId: String) {
+        dir.listFiles()
+            ?.filter { it.name.startsWith(recordId + ".range.") }
+            ?.forEach { it.delete() }
+    }
+
+    private fun openConnection(
+        record: DownloadRecord,
+        rangeStart: Long?,
+        rangeEnd: Long?,
+        ifRange: String?,
+    ): HttpURLConnection {
         return (URL(record.url).openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = true
             connectTimeout = 15_000
@@ -232,9 +556,36 @@ class DirectHttpDownloadService : Service() {
             record.cookie?.takeIf { it.isNotBlank() }?.let { setRequestProperty("Cookie", it) }
             record.userAgent?.takeIf { it.isNotBlank() }?.let { setRequestProperty("User-Agent", it) }
             record.referer?.takeIf { it.isNotBlank() }?.let { setRequestProperty("Referer", it) }
-            if (resumeFrom > 0L) setRequestProperty("Range", "bytes=" + resumeFrom + "-")
+            if (rangeStart != null) {
+                val suffix = rangeEnd?.toString().orEmpty()
+                setRequestProperty("Range", "bytes=" + rangeStart + "-" + suffix)
+                ifRange?.takeIf { it.isNotBlank() }?.let { setRequestProperty("If-Range", it) }
+            }
             connect()
         }
+    }
+
+    private fun resumeValidator(record: DownloadRecord): String? =
+        record.etag?.takeIf { it.isNotBlank() }
+            ?: record.lastModified?.takeIf { it.isNotBlank() }
+
+    private fun validatorsCompatible(
+        record: DownloadRecord,
+        responseEtag: String?,
+        responseLastModified: String?,
+    ): Boolean {
+        val expectedEtag = record.etag?.takeIf { it.isNotBlank() }
+        if (expectedEtag != null && responseEtag != null && expectedEtag != responseEtag) return false
+
+        val expectedModified = record.lastModified?.takeIf { it.isNotBlank() }
+        if (
+            expectedEtag == null &&
+            expectedModified != null &&
+            responseLastModified != null &&
+            expectedModified != responseLastModified
+        ) return false
+
+        return true
     }
 
     private fun publish(
@@ -248,8 +599,7 @@ class DirectHttpDownloadService : Service() {
         val latest = DownloadRegistry.find(recordId) ?: record
         val name = sanitizeFileName(
             dispositionName
-                ?: latest.displayName
-                .ifBlank { "Meerkat-" + System.currentTimeMillis() }
+                ?: latest.displayName.ifBlank { "Meerkat-" + System.currentTimeMillis() }
         )
         val mime = responseMime ?: latest.mimeType ?: "application/octet-stream"
 
@@ -277,7 +627,7 @@ class DirectHttpDownloadService : Service() {
 
         try {
             contentResolver.openOutputStream(uri, "w")?.use { output ->
-                temp.inputStream().use { input -> input.copyTo(output, 128 * 1024) }
+                temp.inputStream().use { input -> input.copyTo(output, IO_BUFFER) }
             } ?: error("無法寫入下載檔案")
 
             contentResolver.update(
@@ -289,7 +639,13 @@ class DirectHttpDownloadService : Service() {
             temp.delete()
 
             DownloadRegistry.update(recordId) { current ->
-                current.copy(displayName = name, mimeType = mime)
+                current.copy(
+                    displayName = name,
+                    mimeType = mime,
+                    expectedLength = current.expectedLength ?: runCatching {
+                        contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize }
+                    }.getOrNull()?.takeIf { it >= 0L },
+                )
             }
             return uri.toString()
         } catch (error: Throwable) {
