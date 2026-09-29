@@ -367,6 +367,10 @@ class DashDownloadService : Service() {
         var mpdDuration: Double? = null
         var periodDuration: Double? = null
         var periodIndex = -1
+        var mpdBase = mpdUrl
+        var periodBase = mpdUrl
+        var inPeriod = false
+        var inAdaptation = false
         var adaptationKind = TrackKind.OTHER
         var adaptationMime: String? = null
         var adaptationBase: String? = null
@@ -385,14 +389,17 @@ class DashDownloadService : Service() {
                     "Period" -> {
                         periodIndex++
                         periodDuration = parseIsoDuration(parser.getAttributeValue(null, "duration"))
+                        periodBase = mpdBase
+                        inPeriod = true
                     }
                     "AdaptationSet" -> {
+                        inAdaptation = true
                         adaptationMime = parser.getAttributeValue(null, "mimeType")
                         adaptationKind = kindFor(
                             parser.getAttributeValue(null, "contentType"),
                             adaptationMime,
                         )
-                        adaptationBase = null
+                        adaptationBase = periodBase
                         adaptationTemplate = null
                         adaptationSegmentList = null
                         adaptationSegmentBase = false
@@ -422,7 +429,14 @@ class DashDownloadService : Service() {
                             segmentBase = false,
                         )
                     }
-                    "BaseURL" -> baseTarget = if (currentRep != null) "rep" else "adapt"
+                    "BaseURL" -> {
+                        baseTarget = when {
+                            currentRep != null -> "rep"
+                            inAdaptation -> "adapt"
+                            inPeriod -> "period"
+                            else -> "mpd"
+                        }
+                    }
                     "SegmentTemplate" -> {
                         val template = Template(
                             initialization = parser.getAttributeValue(null, "initialization"),
@@ -476,8 +490,10 @@ class DashDownloadService : Service() {
                     val value = parser.text.trim()
                     if (value.isNotEmpty()) {
                         when (baseTarget) {
-                            "rep" -> currentRep?.baseUrl = value
-                            "adapt" -> adaptationBase = value
+                            "mpd" -> mpdBase = resolve(mpdUrl, value)
+                            "period" -> periodBase = resolve(mpdBase, value)
+                            "adapt" -> adaptationBase = resolve(periodBase, value)
+                            "rep" -> currentRep?.baseUrl = resolve(adaptationBase ?: periodBase, value)
                         }
                     }
                 }
@@ -485,13 +501,15 @@ class DashDownloadService : Service() {
                 XmlPullParser.END_TAG -> when (parser.name) {
                     "BaseURL" -> baseTarget = null
                     "SegmentTimeline" -> inTimeline = false
+                    "AdaptationSet" -> inAdaptation = false
+                    "Period" -> inPeriod = false
                     "Representation" -> {
                         val b = currentRep
                         val template = b?.template ?: adaptationTemplate
                         val segmentList = b?.segmentList ?: adaptationSegmentList
                         if (b != null) {
                             val durationSeconds = periodDuration ?: mpdDuration
-                            val resolvedBase = resolve(mpdUrl, b.baseUrl ?: adaptationBase ?: ".")
+                            val resolvedBase = b.baseUrl ?: adaptationBase ?: periodBase
                             val hasTemplate =
                                 template?.initialization != null && template.media != null
                             val hasList =
