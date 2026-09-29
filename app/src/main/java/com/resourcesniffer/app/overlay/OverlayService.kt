@@ -180,11 +180,10 @@ class OverlayService : Service() {
         }
         val summary = TextView(this).apply {
             tag = "summary"
+            val sessionId = SessionStore.externalIdOrDefault()
             text = buildSummary(
-                SnifferRepository.preferredResources.value.filter {
-                    val sessionId = SessionStore.externalIdOrDefault()
-                    sessionId == 0L || it.sessionId == sessionId
-                }
+                if (sessionId == 0L) emptyList()
+                else SnifferRepository.preferredResources.value.filter { it.sessionId == sessionId }
             )
             setTextColor(0xFFBEC9C4.toInt())
             textSize = 14f
