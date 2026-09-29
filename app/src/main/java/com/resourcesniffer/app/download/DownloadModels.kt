@@ -17,6 +17,7 @@ data class DownloadRecord(
     val cookie: String?,
     val referer: String?,
     val userAgent: String?,
+    val localSourcePath: String? = null,
     val quality: DownloadQuality = DownloadQuality.HIGH,
     val state: DownloadState,
     val progress: Int? = null,
