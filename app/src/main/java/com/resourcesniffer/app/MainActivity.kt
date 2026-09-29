@@ -300,7 +300,7 @@ private class BrowserCaptureBridge(
 
     private val blobs = ConcurrentHashMap<String, BlobState>()
     private val blobNames = ConcurrentHashMap<String, String>()
-    private val blobDir = File(context.cacheDir, "browser-blobs").apply { mkdirs() }
+    private val blobDir = File(context.filesDir, "captured-blobs").apply { mkdirs() }
 
     @JavascriptInterface
     fun resource(url: String?, mimeType: String?, referer: String?) {
