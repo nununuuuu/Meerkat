@@ -10,7 +10,10 @@ data class CaptureSnapshot(
     val blockQuic: Boolean = false,
     val connections: Long = 0,
     val bytes: Long = 0,
+    val tcp443Connections: Long = 0,
     val quicConnections: Long = 0,
+    val tlsClientHellos: Long = 0,
+    val nonTls443Connections: Long = 0,
     val opaqueTlsConnections: Long = 0,
     val decryptedConnections: Long = 0,
     val failures: Long = 0,
@@ -23,7 +26,8 @@ data class CaptureSnapshot(
         !running -> "全域嗅探已停止"
         connections == 0L -> "VPN 已啟動，等待其他 App 的新連線"
         else -> "已收到 $connections 條連線 · ${bytes / 1024} KB\n" +
-            "HTTPS 已解析 $decryptedConnections · ${if (httpsEnabled) "無法解密" else "HTTPS 未檢查"} $opaqueTlsConnections · HTTP/3 $quicConnections（${if (blockQuic) "已停用" else "轉送中"}）\n轉送失敗 $failures" +
+            "TCP/443 $tcp443Connections · UDP/443 $quicConnections（${if (blockQuic) "已停用" else "轉送中"}）\n" +
+            "TLS 握手辨識 $tlsClientHellos · 非 TLS/443 $nonTls443Connections · HTTPS 已解析 $decryptedConnections · ${if (httpsEnabled) "無法解密" else "HTTPS 未檢查"} $opaqueTlsConnections\n轉送失敗 $failures" +
             (lastFailure?.let { " · 最近：$it" } ?: "") +
             if (!httpsEnabled) "\n本次未啟用 HTTPS 解密：加密流量只會轉送，無法取得資源網址" else ""
     }
@@ -42,11 +46,18 @@ object CaptureStatus {
     @Synchronized fun stopped(error: String? = null) {
         mutable.value = mutable.value.copy(starting = false, running = false, error = error)
     }
-    @Synchronized fun connection(quic: Boolean = false, opaqueTls: Boolean = false) {
+    @Synchronized fun connection(quic: Boolean = false, opaqueTls: Boolean = false, tcp443: Boolean = false) {
         val s = mutable.value
         mutable.value = s.copy(connections = s.connections + 1,
+            tcp443Connections = s.tcp443Connections + if (tcp443) 1 else 0,
             quicConnections = s.quicConnections + if (quic) 1 else 0,
             opaqueTlsConnections = s.opaqueTlsConnections + if (opaqueTls) 1 else 0)
+    }
+    @Synchronized fun tlsClientHello() {
+        mutable.value = mutable.value.copy(tlsClientHellos = mutable.value.tlsClientHellos + 1)
+    }
+    @Synchronized fun nonTls443() {
+        mutable.value = mutable.value.copy(nonTls443Connections = mutable.value.nonTls443Connections + 1)
     }
     @Synchronized fun transferred(count: Int) {
         if (count > 0) mutable.value = mutable.value.copy(bytes = mutable.value.bytes + count)

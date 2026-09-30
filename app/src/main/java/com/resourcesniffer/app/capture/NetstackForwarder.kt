@@ -46,7 +46,10 @@ class NetstackForwarder(
                 dstPort: Long,
                 conn: TCPConn,
             ) {
-                CaptureStatus.connection(opaqueTls = dstPort == 443L && localProxyPort == null)
+                CaptureStatus.connection(
+                    opaqueTls = dstPort == 443L && localProxyPort == null,
+                    tcp443 = dstPort == 443L,
+                )
                 executor.execute { relayTcp(dstIp, dstPort.toInt(), conn) }
             }
 
@@ -186,9 +189,11 @@ class NetstackForwarder(
                 val initial = TlsClientHelloParser.readInitialRecord { buffer -> conn.read(buffer).toInt() }
                     ?: return
                 if (!initial.isClientHello) {
+                    CaptureStatus.nonTls443()
                     relayTcp(dstIp, dstPort, conn, initial.bytes)
                     return
                 }
+                CaptureStatus.tlsClientHello()
                 initial.bytes
             } else {
                 val buffer = ByteArray(32 * 1024)

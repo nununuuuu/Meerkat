@@ -36,4 +36,15 @@ class CaptureStatusTest {
         assertFalse(state.starting)
         assertTrue(state.summary().contains("VPN permission denied"))
     }
+
+    @Test fun diagnosticsDistinguishTcpTlsFromUdp443() {
+        CaptureStatus.connection(quic = true)
+        CaptureStatus.connection(tcp443 = true)
+        CaptureStatus.tlsClientHello()
+        val state = CaptureStatus.state.value
+        assertEquals(1L, state.tcp443Connections)
+        assertEquals(1L, state.quicConnections)
+        assertEquals(1L, state.tlsClientHellos)
+        assertTrue(state.summary().contains("TCP/443 1 · UDP/443 1"))
+    }
 }
