@@ -87,8 +87,8 @@ class NetstackForwarder(
         tunnel = null
     }
 
-    private fun relayTcp(dstIp: String, dstPort: Int, conn: TCPConn) {
-        if (localProxyPort != null && (dstPort == 80 || dstPort == 443)) {
+    private fun relayTcp(dstIp: String, dstPort: Int, conn: TCPConn, initialBytes: ByteArray? = null) {
+        if (initialBytes == null && localProxyPort != null && (dstPort == 80 || dstPort == 443)) {
             relayTcpViaProxy(dstIp, dstPort, conn, localProxyPort)
             return
         }
@@ -108,6 +108,11 @@ class NetstackForwarder(
 
             val upstreamIn = socket.getInputStream()
             val upstreamOut = socket.getOutputStream()
+            if (initialBytes != null) {
+                CaptureStatus.transferred(initialBytes.size)
+                upstreamOut.write(initialBytes)
+                upstreamOut.flush()
+            }
             val closed = AtomicBoolean(false)
             val inspectionFailed = AtomicBoolean(false)
 
@@ -178,7 +183,13 @@ class NetstackForwarder(
         openSockets += endpoint
         try {
             val firstBytes = if (dstPort == 443) {
-                TlsClientHelloParser.readRecord { buffer -> conn.read(buffer).toInt() }
+                val initial = TlsClientHelloParser.readInitialRecord { buffer -> conn.read(buffer).toInt() }
+                    ?: return
+                if (!initial.isClientHello) {
+                    relayTcp(dstIp, dstPort, conn, initial.bytes)
+                    return
+                }
+                initial.bytes
             } else {
                 val buffer = ByteArray(32 * 1024)
                 val count = conn.read(buffer).toInt()

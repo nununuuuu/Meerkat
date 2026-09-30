@@ -40,6 +40,42 @@ class TlsClientHelloParserTest {
         assertArrayEquals(expected, TlsClientHelloParser.readRecord { input.read(it) })
     }
 
+    @Test fun recognizesClientHelloForInspection() {
+        val expected = hello()
+        val input = ByteArrayInputStream(expected)
+        val result = TlsClientHelloParser.readInitialRecord { input.read(it, 0, minOf(3, it.size)) }
+        assertNotNull(result)
+        assertTrue(result!!.isClientHello)
+        assertArrayEquals(expected, result.bytes)
+    }
+
+    @Test fun preservesNonTlsPort443BytesForDirectRelay() {
+        val expected = "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n".toByteArray()
+        val input = ByteArrayInputStream(expected)
+        val result = TlsClientHelloParser.readInitialRecord { input.read(it) }
+        assertNotNull(result)
+        assertFalse(result!!.isClientHello)
+        assertArrayEquals(expected, result.bytes)
+    }
+
+    @Test fun nonTlsPrefaceDoesNotWaitForFiveBytes() {
+        var reads = 0
+        val result = TlsClientHelloParser.readInitialRecord { buffer ->
+            reads++
+            buffer[0] = 'G'.code.toByte()
+            1
+        }
+        assertEquals(1, reads)
+        assertNotNull(result)
+        assertFalse(result!!.isClientHello)
+        assertArrayEquals(byteArrayOf('G'.code.toByte()), result.bytes)
+    }
+
+    @Test fun closedIncompleteHelloIsNotCountedAsProxyFailure() {
+        val input = ByteArrayInputStream(hello().dropLast(2).toByteArray())
+        assertNull(TlsClientHelloParser.readInitialRecord { input.read(it) })
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun rejectsTruncatedRecordInsteadOfIssuingCertificateForIp() {
         val input = ByteArrayInputStream(hello().dropLast(2).toByteArray())

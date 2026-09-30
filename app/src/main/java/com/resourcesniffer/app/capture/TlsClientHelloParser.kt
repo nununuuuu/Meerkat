@@ -2,6 +2,25 @@ package com.resourcesniffer.app.capture
 
 /** Parses a complete TLS ClientHello record, independent of TCP read boundaries. */
 object TlsClientHelloParser {
+    data class InitialRecord(val bytes: ByteArray, val isClientHello: Boolean)
+
+    /** Keep the bytes already read so non-TLS traffic on port 443 can be relayed unchanged. */
+    fun readInitialRecord(read: (ByteArray) -> Int): InitialRecord? {
+        val captured = java.io.ByteArrayOutputStream()
+        return try {
+            val bytes = readRecord { buffer ->
+                val count = read(buffer)
+                if (count > 0) captured.write(buffer, 0, count)
+                count
+            }
+            InitialRecord(bytes, bytes.size > 5 && (bytes[5].toInt() and 0xff) == 1)
+        } catch (error: IllegalArgumentException) {
+            val bytes = captured.toByteArray()
+            if (bytes.isEmpty() || error.message == "TLS ClientHello 已中斷") null
+            else InitialRecord(bytes, false)
+        }
+    }
+
     /** Preserve every byte read, including bytes following the first record. */
     fun readRecord(read: (ByteArray) -> Int): ByteArray {
         val output = java.io.ByteArrayOutputStream()
@@ -12,8 +31,8 @@ object TlsClientHelloParser {
             require(n in 1..buffer.size) { "TLS ClientHello 已中斷" }
             output.write(buffer, 0, n)
             val bytes = output.toByteArray()
+            require((bytes[0].toInt() and 0xff) == 22) { "不是 TLS ClientHello" }
             if (bytes.size >= 5) {
-                require((bytes[0].toInt() and 0xff) == 22) { "不是 TLS ClientHello" }
                 val length = u16(bytes, 3)
                 require(length in 1..18432) { "TLS record 長度無效" }
                 required = 5 + length
@@ -64,4 +83,3 @@ object TlsClientHelloParser {
     }
     private fun u16(b: ByteArray, o: Int) = ((b[o].toInt() and 0xff) shl 8) or (b[o+1].toInt() and 0xff)
 }
-
