@@ -46,3 +46,8 @@ Test builds use the public development signing identity in
 beta6 and subsequent test APK upgrades compatible and preserves app-local CA keys.
 Older beta APKs used ephemeral CI debug identities and may require a one-time
 reinstall and a freshly exported CA. This key is not for production signing.
+
+Every successful main-branch APK build is automatically published with its SHA-256.
+New versionNames use their version tag; additional APKs with the same version use
+build-number tags. Identical already-published APKs are skipped, and old release
+assets are preserved.
