@@ -1290,6 +1290,8 @@ private fun ExternalAppPane(
                     "目前只轉送 HTTPS 加密流量，無法從中讀取媒體網址。請安裝目前的 CA、啟用「嘗試 HTTPS 解密」，再重新開始嗅探。"
                 captureStatus.decryptedConnections == 0L && captureStatus.opaqueTlsConnections > 0L ->
                     "已有加密連線無法解密。目標 App 可能不信任使用者 CA 或使用憑證釘選；停用 HTTP/3 也無法解除此限制。"
+                captureStatus.decryptedConnections == 0L && captureStatus.failures > 0L ->
+                    "尚無 HTTPS 連線成功解析，且已有 ${captureStatus.failures} 次轉送失敗。請查看上方的最近失敗類型；這不一定是憑證問題。"
                 captureStatus.decryptedConnections == 0L && captureStatus.quicConnections > 0L ->
                     "流量可能仍走 HTTP/3。可開啟「嘗試 TCP 嗅探」，再讓目標 App 重新建立連線。"
                 captureStatus.decryptedConnections > 0L ->
