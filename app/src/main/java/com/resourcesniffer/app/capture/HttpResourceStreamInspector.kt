@@ -773,6 +773,7 @@ class HttpResourceStreamInspector(
             userAgent = request.userAgent,
             cookie = request.cookie,
         )
+        val generation = SnifferRepository.generation
         SnifferRepository.add(resource)
         val responseAlreadyIdentifiesResource =
             contentLength != null &&
@@ -781,7 +782,7 @@ class HttpResourceStreamInspector(
                 ResourceClassifier.normalizeMime(mime).isNotBlank()
         if (!responseAlreadyIdentifiesResource) {
             ResourceValidator.validate(resource) { validated ->
-                SnifferRepository.add(validated)
+                SnifferRepository.addIfGeneration(validated, generation)
             }
         }
         return resource
@@ -994,3 +995,4 @@ class HttpResourceStreamInspector(
         )
     }
 }
+

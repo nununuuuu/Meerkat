@@ -11,6 +11,8 @@ import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.os.Message
+import android.view.View
 import android.provider.Settings
 import android.util.Base64
 import android.webkit.CookieManager
@@ -60,6 +62,7 @@ import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -185,7 +188,6 @@ private fun MeerkatApp(
         if (!incomingUrl.isNullOrBlank()) {
             address = incomingUrl
             mode = MainMode.BROWSER
-            webView?.loadUrl(incomingUrl)
         }
     }
 
@@ -242,23 +244,28 @@ private fun MeerkatApp(
                 }
             },
         ) { padding ->
-            Column(
+            Box(
                 Modifier
                     .padding(padding)
                     .padding(horizontal = 14.dp, vertical = 8.dp)
                     .fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                // Keep the browser in composition: tab changes must not recreate its
+                // WebView, history, scroll position, or JavaScript capture hooks.
+                BrowserPane(
+                    visible = mode == MainMode.BROWSER,
+                    incomingUrl = incomingUrl,
+                    address = address,
+                    onAddressChange = { address = it },
+                    onWebViewReady = { webView = it },
+                    viewModel = viewModel,
+                    resources = resources,
+                    currentSessionId = browserSession?.id,
+                    onOpenResources = { mode = MainMode.RESOURCES },
+                    onClear = viewModel::clear,
+                )
                 when (mode) {
-                    MainMode.BROWSER -> BrowserPane(
-                        address = address,
-                        onAddressChange = { address = it },
-                        onWebViewReady = { webView = it },
-                        viewModel = viewModel,
-                        resources = resources,
-                        currentSessionId = browserSession?.id,
-                        onOpenResources = { mode = MainMode.RESOURCES },
-                    )
+                    MainMode.BROWSER -> Unit
                     MainMode.EXTERNAL -> ExternalAppPane(
                         captureActive = externalCaptureActive,
                         onStart = {
@@ -323,7 +330,6 @@ private fun MeerkatApp(
 private class BrowserCaptureBridge(
     private val context: Context,
     private val viewModel: MainViewModel,
-    private val userAgent: String,
 ) {
     private data class BlobState(
         val file: File,
@@ -349,7 +355,7 @@ private class BrowserCaptureBridge(
             mimeType = mimeType?.takeIf { it.isNotBlank() && it != "null" },
             requestHeaders = mapOf(
                 "Referer" to referer.orEmpty(),
-                "User-Agent" to userAgent,
+                "User-Agent" to browserUserAgent(context, referer.orEmpty()),
                 "Cookie" to (CookieManager.getInstance().getCookie(target) ?: ""),
             ),
         )
@@ -707,6 +713,8 @@ private fun installBrowserCapture(webView: WebView) {
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun BrowserPane(
+    visible: Boolean,
+    incomingUrl: String?,
     address: String,
     onAddressChange: (String) -> Unit,
     onWebViewReady: (WebView) -> Unit,
@@ -714,6 +722,7 @@ private fun BrowserPane(
     resources: List<Resource>,
     currentSessionId: Long?,
     onOpenResources: () -> Unit,
+    onClear: () -> Unit,
 ) {
     var localAddress by remember { mutableStateOf(address) }
     var activeUrl by remember { mutableStateOf(address.takeIf { it.isNotBlank() }) }
@@ -728,6 +737,17 @@ private fun BrowserPane(
         }
     }
 
+    LaunchedEffect(incomingUrl) {
+        if (!incomingUrl.isNullOrBlank()) {
+            val url = normalizeUrl(incomingUrl)
+            localAddress = url
+            activeUrl = url
+            pageError = null
+            // A first URL creates the WebView below; subsequent shares navigate it.
+            if (webView?.url != url) webView?.loadBrowserUrl(url)
+        }
+    }
+
     val liveResources = remember(resources, currentSessionId) {
         if (currentSessionId == null) emptyList()
         else resources.filter { it.sessionId == currentSessionId }
@@ -738,7 +758,12 @@ private fun BrowserPane(
     val otherCount = liveResources.count { it.uiCategory() == UiResourceCategory.OTHER }
 
     Column(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize().layout { measurable, constraints ->
+            val placeable = measurable.measure(constraints)
+            layout(placeable.width, placeable.height) {
+                if (visible) placeable.placeRelative(0, 0)
+            }
+        },
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Surface(
@@ -773,7 +798,7 @@ private fun BrowserPane(
                             activeUrl = url
                             onAddressChange(url)
                             pageError = null
-                            webView?.loadUrl(url)
+                            webView?.loadBrowserUrl(url)
                         },
                     ) { Text("開啟") }
                 }
@@ -807,6 +832,9 @@ private fun BrowserPane(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                     )
+                    IconButton(onClick = onClear, enabled = resources.isNotEmpty()) {
+                        Icon(Icons.Default.Delete, "清除資源")
+                    }
                     TextButton(onClick = onOpenResources) { Text("資源") }
                 }
             }
@@ -873,10 +901,11 @@ private fun BrowserPane(
                         settings.builtInZoomControls = true
                         settings.displayZoomControls = false
                         settings.javaScriptCanOpenWindowsAutomatically = true
+                        settings.setSupportMultipleWindows(true)
                         settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
 
                         addJavascriptInterface(
-                            BrowserCaptureBridge(ctx, viewModel, settings.userAgentString),
+                            BrowserCaptureBridge(ctx, viewModel),
                             "MeerkatCapture",
                         )
                         val hasDocumentStart =
@@ -893,6 +922,34 @@ private fun BrowserPane(
                         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
                         webChromeClient = object : WebChromeClient() {
+                            override fun onCreateWindow(
+                                view: WebView?,
+                                isDialog: Boolean,
+                                isUserGesture: Boolean,
+                                resultMsg: Message?,
+                            ): Boolean {
+                                // target="_blank" and window.open must use the same captured
+                                // browser, rather than an external app or an uncaptured window.
+                                val message = resultMsg ?: return false
+                                val transport = message.obj as? WebView.WebViewTransport ?: return false
+                                val popup = WebView(ctx)
+                                popup.webViewClient = object : WebViewClient() {
+                                    override fun shouldOverrideUrlLoading(
+                                        view: WebView?,
+                                        request: WebResourceRequest?,
+                                    ): Boolean {
+                                        val target = request?.url?.toString() ?: return true
+                                        if (target == "about:blank") return false
+                                        resolveBrowsableUrl(target)?.let { loadBrowserUrl(it) }
+                                        popup.post { popup.destroy() }
+                                        return true
+                                    }
+                                }
+                                transport.webView = popup
+                                message.sendToTarget()
+                                return true
+                            }
+
                             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                                 progress = newProgress
                                 loading = newProgress in 0..99
@@ -912,12 +969,18 @@ private fun BrowserPane(
 
                                 if (scheme == "http" || scheme == "https") {
                                     if (isInstagramHost(currentUrl) && isInstagramStoreUrl(raw)) return true
+                                    if (req.isForMainFrame && view != null &&
+                                        view.settings.userAgentString != browserUserAgent(view.context, raw)
+                                    ) {
+                                        view.loadBrowserUrl(raw)
+                                        return true
+                                    }
                                     return false
                                 }
 
-                                // App deep links are not page-load errors. Ignore background
-                                // attempts; only explicit user taps may be converted to web URLs.
-                                if (req.hasGesture()) {
+                                // Convert main-frame app links automatically. Never launch
+                                // another app; subframes must not replace the current page.
+                                if (req.isForMainFrame) {
                                     val fallback = resolveBrowsableUrl(raw)
                                     if (
                                         !fallback.isNullOrBlank() &&
@@ -927,7 +990,7 @@ private fun BrowserPane(
                                         localAddress = fallback
                                         activeUrl = fallback
                                         onAddressChange(fallback)
-                                        view?.loadUrl(fallback)
+                                        view?.loadBrowserUrl(fallback)
                                     }
                                 }
                                 return true
@@ -1024,12 +1087,18 @@ private fun BrowserPane(
                             }
                         }
 
-                        loadUrl(activeUrl!!)
+                        loadBrowserUrl(activeUrl!!)
                     }
                 },
                 update = { view ->
                     webView = view
                     onWebViewReady(view)
+                    view.visibility = if (visible) View.VISIBLE else View.INVISIBLE
+                },
+                onRelease = { view ->
+                    view.stopLoading()
+                    view.removeJavascriptInterface("MeerkatCapture")
+                    view.destroy()
                 },
             )
         }
@@ -1949,6 +2018,21 @@ private fun resourceTypeLabel(type: ResourceType): String = when (type) {
     ResourceType.OTHER -> "其他"
 }
 
+private fun browserUserAgent(context: Context, url: String): String {
+    val mobile = WebSettings.getDefaultUserAgent(context)
+        .replace("; wv", "")
+        .replace("Version/4.0 ", "")
+    return if (isInstagramHost(url)) {
+        mobile.replace(Regex("\\([^)]*\\)"), "(X11; Linux x86_64)")
+            .replace(" Mobile", "")
+    } else mobile
+}
+
+private fun WebView.loadBrowserUrl(url: String) {
+    settings.userAgentString = browserUserAgent(context, url)
+    loadUrl(url)
+}
+
 private fun resolveBrowsableUrl(raw: String): String? {
     val trimmed = raw.trim()
     if (trimmed.startsWith("http://", true) || trimmed.startsWith("https://", true)) {
@@ -2059,3 +2143,4 @@ private fun formatBytes(value: Long): String = when {
     value >= 1024L -> "%.1f KB".format(value / 1024.0)
     else -> "$value B"
 }
+

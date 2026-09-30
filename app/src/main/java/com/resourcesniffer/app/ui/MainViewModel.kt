@@ -61,9 +61,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 durationMs = durationMs,
                 mediaGroupKey = MediaIdentity.groupKey(url),
             )
+        val generation = SnifferRepository.generation
         SnifferRepository.add(resource)
         ResourceValidator.validate(resource) { validated ->
-            SnifferRepository.add(validated)
+            SnifferRepository.addIfGeneration(validated, generation)
         }
     }
 
@@ -148,3 +149,4 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearCurrentSession() = SnifferRepository.clearSession(SessionStore.idOrDefault())
 }
+

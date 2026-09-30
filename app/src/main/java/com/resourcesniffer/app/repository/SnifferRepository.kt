@@ -21,6 +21,9 @@ object SnifferRepository {
     private const val KEY_HISTORY = "history"
     private const val MAX_HISTORY = 500
 
+    @Volatile var generation: Long = 0
+        private set
+
     private val _resources = MutableStateFlow<List<Resource>>(emptyList())
     val resources: StateFlow<List<Resource>> = _resources.asStateFlow()
 
@@ -104,7 +107,14 @@ object SnifferRepository {
     }
 
     @Synchronized
+    fun addIfGeneration(resource: Resource, expectedGeneration: Long) {
+        if (generation == expectedGeneration) add(resource)
+    }
+
+    @Synchronized
     fun clear() {
+        generation++
+        pendingPersist?.cancel(false)
         deleteLocalFiles(_resources.value)
         _resources.value = emptyList()
         _preferredResources.value = emptyList()
@@ -164,8 +174,9 @@ object SnifferRepository {
     private fun schedulePersist() {
         pendingPersist?.cancel(false)
         pendingPersist = persistenceExecutor.schedule({
-            val snapshot = _resources.value
-            persistHistory(snapshot)
+            synchronized(this) {
+                persistHistory(_resources.value)
+            }
         }, 750, TimeUnit.MILLISECONDS)
     }
 
@@ -269,3 +280,4 @@ object SnifferRepository {
         }.getOrDefault(emptyList())
     }
 }
+
