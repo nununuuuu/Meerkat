@@ -161,7 +161,7 @@ class NetstackForwarder(
             upload.join()
             download.join()
         } catch (error: Exception) {
-            CaptureStatus.failure()
+            CaptureStatus.failure("TCP：${error.javaClass.simpleName}")
             Log.w("MeerkatRelay", "Upstream relay failed", error)
         } finally {
             runCatching { conn.close() }
@@ -238,7 +238,7 @@ class NetstackForwarder(
             upload.join()
             download.join()
         } catch (error: Exception) {
-            CaptureStatus.failure()
+            CaptureStatus.failure("HTTPS 代理：${error.javaClass.simpleName}")
             Log.w("MeerkatRelay", "Upstream relay failed", error)
         } finally {
             runCatching { conn.close() }
@@ -307,7 +307,7 @@ class NetstackForwarder(
             upload.join()
             download.join()
         } catch (error: Exception) {
-            CaptureStatus.failure()
+            CaptureStatus.failure("UDP：${error.javaClass.simpleName}")
             Log.w("MeerkatRelay", "Upstream relay failed", error)
         } finally {
             runCatching { conn.close() }

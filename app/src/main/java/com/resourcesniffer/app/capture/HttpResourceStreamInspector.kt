@@ -432,18 +432,20 @@ class HttpResourceStreamInspector(
     }
 
     private fun finishResponse() {
-        val context = responseContext
+        val context = responseContext ?: return
         responseContext = null
-        var resource = context?.resource ?: return
+        var resource = context.resource
 
         context.cache?.finish()?.let { cached ->
-            resource = resource.copy(
+            val target = resource ?: return@let
+            val cachedResource = target.copy(
                 localCachePath = cached.absolutePath,
-                contentLength = resource.contentLength ?: cached.length(),
+                contentLength = target.contentLength ?: cached.length(),
                 validationState = com.resourcesniffer.app.core.ValidationState.VERIFIED,
                 verifiedAt = System.currentTimeMillis(),
             )
-            SnifferRepository.add(resource)
+            resource = cachedResource
+            SnifferRepository.add(cachedResource)
         }
 
         val body = context.body?.toByteArray() ?: return
@@ -455,11 +457,11 @@ class HttpResourceStreamInspector(
             .take(MAX_INSPECT_BODY_CHARS)
 
         val enriched = when (context.streamType) {
-            StreamType.HLS -> enrichHls(resource, text)
-            StreamType.DASH -> enrichDash(resource, text)
+            StreamType.HLS -> resource?.let { enrichHls(it, text) }
+            StreamType.DASH -> resource?.let { enrichDash(it, text) }
             else -> resource
         }
-        if (enriched != resource) SnifferRepository.add(enriched)
+        if (enriched != null && enriched != resource) SnifferRepository.add(enriched)
 
         deepSearch(context.request, text)
     }
@@ -995,4 +997,3 @@ class HttpResourceStreamInspector(
         )
     }
 }
-
