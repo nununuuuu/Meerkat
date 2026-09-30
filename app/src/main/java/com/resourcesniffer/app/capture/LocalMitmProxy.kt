@@ -97,6 +97,7 @@ class LocalMitmProxy(
 
     private fun handleTls(client: Socket, host: String, dstIp: String, port: Int) {
         if (host.lowercase() in bypassHosts) {
+            CaptureStatus.opaqueTls()
             relayRawTls(client, dstIp, port)
             return
         }
@@ -129,6 +130,7 @@ class LocalMitmProxy(
             try {
                 clientTls.startHandshake()
             } catch (error: SSLHandshakeException) {
+                CaptureStatus.opaqueTls()
                 bypassHosts += host.lowercase()
                 throw error
             }
@@ -136,8 +138,8 @@ class LocalMitmProxy(
             val clientProtocol = clientTls.applicationProtocol.orEmpty()
             val upstreamProtocol = upstreamTls.applicationProtocol.orEmpty()
             val inspector = if (
-                clientProtocol.equals("http/1.1", true) &&
-                upstreamProtocol.equals("http/1.1", true)
+                TlsClientHelloParser.isHttp1(clientProtocol) &&
+                TlsClientHelloParser.isHttp1(upstreamProtocol)
             ) {
                 HttpResourceStreamInspector(
                     sourcePackage,
@@ -148,6 +150,7 @@ class LocalMitmProxy(
             } else {
                 null
             }
+            if (inspector != null) CaptureStatus.decrypted()
             relay(
                 BufferedInputStream(clientTls.inputStream), BufferedOutputStream(clientTls.outputStream),
                 BufferedInputStream(upstreamTls.inputStream), BufferedOutputStream(upstreamTls.outputStream),
@@ -269,3 +272,4 @@ class LocalMitmProxy(
         host == address.hostAddress || host.contains(":")
     }.getOrDefault(false)
 }
+

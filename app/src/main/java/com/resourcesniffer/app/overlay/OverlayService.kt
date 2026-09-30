@@ -23,7 +23,7 @@ import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.resourcesniffer.app.MainActivity
 import com.resourcesniffer.app.R
-import com.resourcesniffer.app.capture.SnifferVpnService
+import com.resourcesniffer.app.capture.CaptureStatus
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.repository.SnifferRepository
 import com.resourcesniffer.app.repository.SessionStore
@@ -47,7 +47,12 @@ class OverlayService : Service() {
             } else {
                 SnifferRepository.preferredResources.value.filter { it.sessionId == sessionId }
             }
-            bubble?.text = items.size.toString()
+            val status = CaptureStatus.state.value
+            bubble?.text = when {
+                status.starting -> "…"
+                !status.running -> "停止"
+                else -> items.size.toString()
+            }
             panel?.findViewWithTag<TextView>("summary")?.text = buildSummary(items)
             handler.postDelayed(this, 250)
         }
@@ -196,6 +201,7 @@ class OverlayService : Service() {
             setOnClickListener {
                 startActivity(
                     Intent(this@OverlayService, MainActivity::class.java)
+                        .putExtra("open_resources", true)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 )
                 hidePanel()
@@ -223,7 +229,7 @@ class OverlayService : Service() {
         layout.addView(stop)
 
         val params = WindowManager.LayoutParams(
-            (280*density).toInt(),
+            minOf((320*density).toInt(), resources.displayMetrics.widthPixels - (32*density).toInt()),
             WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
@@ -231,7 +237,7 @@ class OverlayService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.END
             x = 18
-            y = (370*density).toInt()
+            y = (100*density).toInt()
         }
 
         windowManager.addView(layout, params)
@@ -245,7 +251,7 @@ class OverlayService : Service() {
 
     private fun buildSummary(items: List<com.resourcesniffer.app.core.Resource>): String {
         if (items.isEmpty()) {
-            return "目前沒有已抓到的資源"
+            return CaptureStatus.state.value.summary() + "\n尚未找到可下載資源"
         }
         val imageCount = items.count { it.type == ResourceType.IMAGE }
         val videoCount = items.count {
@@ -257,7 +263,7 @@ class OverlayService : Service() {
                 it.type == ResourceType.ARCHIVE ||
                 it.type == ResourceType.OTHER
         }
-        return "圖片 $imageCount　影片 $videoCount\n" +
+        return CaptureStatus.state.value.summary() + "\n圖片 $imageCount　影片 $videoCount\n" +
             "文件 $documentCount　其他 $otherCount\n" +
             "總計 ${items.size}"
     }
@@ -284,3 +290,4 @@ class OverlayService : Service() {
         }
     }
 }
+

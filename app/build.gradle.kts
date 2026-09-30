@@ -15,8 +15,8 @@ android {
         applicationId = "com.resourcesniffer.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 12
-        versionName = "0.6.0-beta4"
+        versionCode = 13
+        versionName = "0.6.0-beta5"
     }
 
     buildFeatures {
@@ -58,5 +58,8 @@ dependencies {
     implementation("org.brotli:dec:0.1.2")
     implementation(files("libs/netstack.aar"))
 
+    testImplementation("junit:junit:4.13.2")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
+

@@ -51,7 +51,8 @@ object SnifferRepository {
             it.id == resource.id || (
                 MediaIdentity.exactKey(it.finalUrl ?: it.url) == resourceKey &&
                     it.type == resource.type &&
-                    it.sourceAppPackage == resource.sourceAppPackage
+                    it.sourceAppPackage == resource.sourceAppPackage &&
+                    it.sessionId == resource.sessionId
             )
         }
 
@@ -166,7 +167,7 @@ object SnifferRepository {
 
     private fun recomputePreferred(all: List<Resource>) {
         _preferredResources.value = all
-            .groupBy { it.mediaGroupKey ?: MediaIdentity.groupKey(it.finalUrl ?: it.url) ?: "id:" + it.id }
+            .groupBy { it.sessionId to (it.mediaGroupKey ?: MediaIdentity.groupKey(it.finalUrl ?: it.url) ?: "id:" + it.id) }
             .values
             .mapNotNull { variants -> variants.maxByOrNull(::qualityScore) }
             .sortedByDescending { it.detectedAt }
@@ -280,4 +281,5 @@ object SnifferRepository {
         }.getOrDefault(emptyList())
     }
 }
+
 

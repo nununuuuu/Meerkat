@@ -7,6 +7,8 @@ import android.content.Intent
 import android.net.VpnService
 import android.net.ConnectivityManager
 import android.os.Build
+import android.os.ParcelFileDescriptor
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.resourcesniffer.app.MainActivity
 import com.resourcesniffer.app.R
@@ -17,6 +19,7 @@ class SnifferVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.resourcesniffer.app.START_CAPTURE"
         const val ACTION_STOP = "com.resourcesniffer.app.STOP_CAPTURE"
+        const val EXTRA_BLOCK_QUIC = "block_quic"
         const val EXTRA_ENABLE_HTTPS_MITM = "enable_https_mitm"
         private const val CHANNEL_ID = "sniffer_vpn"
         private const val NOTIFICATION_ID = 1001
@@ -24,82 +27,89 @@ class SnifferVpnService : VpnService() {
 
     @Volatile private var forwarder: NetstackForwarder? = null
     @Volatile private var localProxy: LocalMitmProxy? = null
+    private var tun: ParcelFileDescriptor? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> stopCapture()
             else -> startCapture(
                 intent?.getBooleanExtra(EXTRA_ENABLE_HTTPS_MITM, false) == true,
+                intent?.getBooleanExtra(EXTRA_BLOCK_QUIC, false) == true,
             )
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     @Synchronized
-    private fun startCapture(enableHttpsMitm: Boolean) {
+    private fun startCapture(enableHttpsMitm: Boolean, blockQuic: Boolean) {
         if (forwarder != null) return
 
-        SessionStore.startExternal(targetPackage = null, targetName = "全域 App 嗅探")
-        createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification())
-
-        val builder = Builder()
-            .setSession("Meerkat 資源嗅探")
-            .setMtu(1500)
-            .addAddress("10.73.0.1", 32)
-            .addRoute("0.0.0.0", 0)
-
-        val connectivity = getSystemService(ConnectivityManager::class.java)
-        val dnsServers = connectivity.activeNetwork
-            ?.let(connectivity::getLinkProperties)
-            ?.dnsServers
-            .orEmpty()
-            .filter { !it.isLoopbackAddress && !it.isAnyLocalAddress }
-            .distinct()
-
-        if (dnsServers.isEmpty()) {
-            builder.addDnsServer("1.1.1.1")
-            builder.addDnsServer("8.8.8.8")
-        } else {
-            dnsServers.forEach(builder::addDnsServer)
-        }
-
-        // Global mode: capture all device traffic except Meerkat itself.
-        // Proxy/upstream sockets are also protected individually, but excluding
-        // our own package avoids routing WebView/download traffic back into TUN.
-        runCatching { builder.addDisallowedApplication(packageName) }
-
-        val pfd = builder.establish() ?: run {
-            stopCapture()
-            return
-        }
-
-        val fd = pfd.detachFd()
-        val targetName = "全域 App 嗅探"
-        val proxyPort = if (enableHttpsMitm) {
-            val ca = MitmCertificateAuthority(this)
-            val proxy = LocalMitmProxy(this, null, targetName, ca)
-            localProxy = proxy
-            proxy.start()
-        } else null
-        val engine = NetstackForwarder(this, null, targetName, proxyPort)
-        forwarder = engine
-
+        CaptureStatus.starting()
         try {
+            createNotificationChannel()
+            startForeground(NOTIFICATION_ID, buildNotification())
+
+            val builder = Builder()
+                .setSession("Meerkat 資源嗅探")
+                .setMtu(1500)
+                .addAddress("10.73.0.1", 32)
+                .addRoute("0.0.0.0", 0)
+                .addAddress("fd73:6d65:6572::1", 128)
+                .addRoute("::", 0)
+
+            val connectivity = getSystemService(ConnectivityManager::class.java)
+            val dnsServers = connectivity.activeNetwork
+                ?.let(connectivity::getLinkProperties)
+                ?.dnsServers
+                .orEmpty()
+                .filter { !it.isLoopbackAddress && !it.isAnyLocalAddress }
+                .distinct()
+
+            if (dnsServers.isEmpty()) {
+                builder.addDnsServer("1.1.1.1")
+                builder.addDnsServer("8.8.8.8")
+            } else {
+                dnsServers.forEach(builder::addDnsServer)
+            }
+
+            // Global mode: capture all device traffic except Meerkat itself.
+            // Proxy/upstream sockets are also protected individually, but excluding
+            // our own package avoids routing WebView/download traffic back into TUN.
+            runCatching { builder.addDisallowedApplication(packageName) }
+
+            val pfd = builder.establish() ?: error("系統未建立 VPN，請重新授權")
+            tun = pfd
+            val fd = pfd.fd
+            val targetName = "全域 App 嗅探"
+            val proxyPort = if (enableHttpsMitm) {
+                val ca = MitmCertificateAuthority(this)
+                val proxy = LocalMitmProxy(this, null, targetName, ca)
+                localProxy = proxy
+                proxy.start()
+            } else null
+            val engine = NetstackForwarder(this, null, targetName, proxyPort, blockQuic && enableHttpsMitm)
+            forwarder = engine
+
+            SessionStore.startExternal(targetPackage = null, targetName = targetName)
             engine.start(fd, 1500)
-        } catch (_: Throwable) {
-            stopCapture()
+            CaptureStatus.started(enableHttpsMitm)
+        } catch (error: Throwable) {
+            Log.e("MeerkatVPN", "Unable to start capture", error)
+            stopCapture(error.message ?: error.javaClass.simpleName)
         }
     }
 
     @Synchronized
-    private fun stopCapture() {
+    private fun stopCapture(error: String? = null) {
         val engine = forwarder
         forwarder = null
         runCatching { engine?.stop() }
         runCatching { localProxy?.stop() }
         localProxy = null
+        runCatching { tun?.close() }
+        tun = null
         SessionStore.stopExternal()
+        CaptureStatus.stopped(error)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -110,11 +120,7 @@ class SnifferVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        val engine = forwarder
-        forwarder = null
-        runCatching { engine?.stop() }
-        runCatching { localProxy?.stop() }
-        localProxy = null
+        stopCapture(CaptureStatus.state.value.error)
         super.onDestroy()
     }
 
@@ -145,3 +151,4 @@ class SnifferVpnService : VpnService() {
         }
     }
 }
+

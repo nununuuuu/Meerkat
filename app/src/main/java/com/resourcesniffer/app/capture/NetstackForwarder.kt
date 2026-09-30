@@ -1,6 +1,7 @@
 package com.resourcesniffer.app.capture
 
 import android.net.VpnService
+import android.util.Log
 import java.io.File
 import dev.netvalve.bridge.Bridge
 import dev.netvalve.bridge.Handler
@@ -28,6 +29,7 @@ class NetstackForwarder(
     private val sourcePackage: String?,
     private val sourceName: String?,
     private val localProxyPort: Int? = null,
+    private val blockQuic: Boolean = false,
 ) {
     private val executor = Executors.newCachedThreadPool()
     private val stopped = AtomicBoolean(false)
@@ -43,6 +45,7 @@ class NetstackForwarder(
                 dstPort: Long,
                 conn: TCPConn,
             ) {
+                CaptureStatus.connection(opaqueTls = dstPort == 443L && localProxyPort == null)
                 executor.execute { relayTcp(dstIp, dstPort.toInt(), conn) }
             }
 
@@ -53,10 +56,17 @@ class NetstackForwarder(
                 dstPort: Long,
                 conn: UDPConn,
             ) {
+                CaptureStatus.connection(quic = dstPort == 443L)
+                if (blockQuic && dstPort == 443L) {
+                    runCatching { conn.close() }
+                    return
+                }
                 executor.execute { relayUdp(dstIp, dstPort.toInt(), conn) }
             }
 
-            override fun log(level: Long, msg: String) = Unit
+            override fun log(level: Long, msg: String) {
+                if (level >= 2) Log.w("MeerkatNetstack", msg)
+            }
         }
         tunnel = Bridge.newTunnel(tunFd.toLong(), mtu.toLong(), "RELAY", handler)
     }
@@ -77,6 +87,8 @@ class NetstackForwarder(
         }
         val socket = Socket()
         openSockets += socket
+        val endpoint = java.io.Closeable { conn.close() }
+        openSockets += endpoint
         val inspector = HttpResourceStreamInspector(
             sourcePackage,
             sourceName,
@@ -97,15 +109,14 @@ class NetstackForwarder(
                     while (!stopped.get() && !closed.get()) {
                         val n = try { conn.read(buffer).toInt() } catch (_: Exception) { -1 }
                         if (n <= 0) break
+                        CaptureStatus.transferred(n)
                         inspector.onClientBytes(buffer, n)
                         upstreamOut.write(buffer, 0, n)
                         upstreamOut.flush()
                     }
                 } catch (_: Exception) {
                 } finally {
-                    closed.set(true)
                     runCatching { socket.shutdownOutput() }
-                    runCatching { conn.close() }
                 }
             }.apply { name = "Meerkat-TCP-Up"; isDaemon = true }
 
@@ -115,13 +126,14 @@ class NetstackForwarder(
                     while (!stopped.get() && !closed.get()) {
                         val n = upstreamIn.read(buffer)
                         if (n <= 0) break
+                        CaptureStatus.transferred(n)
                         inspector.onServerBytes(buffer, n)
                         conn.write(if (n == buffer.size) buffer else buffer.copyOfRange(0, n))
                     }
                 } catch (_: Exception) {
                 } finally {
                     closed.set(true)
-                    runCatching { socket.shutdownInput() }
+                    runCatching { socket.close() }
                     runCatching { conn.close() }
                 }
             }.apply { name = "Meerkat-TCP-Down"; isDaemon = true }
@@ -130,22 +142,32 @@ class NetstackForwarder(
             download.start()
             upload.join()
             download.join()
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            CaptureStatus.failure()
+            Log.w("MeerkatRelay", "Upstream relay failed", error)
         } finally {
             runCatching { conn.close() }
             runCatching { socket.close() }
             openSockets -= socket
+            openSockets -= endpoint
         }
     }
 
     private fun relayTcpViaProxy(dstIp: String, dstPort: Int, conn: TCPConn, proxyPort: Int) {
         val socket = Socket()
         openSockets += socket
+        val endpoint = java.io.Closeable { conn.close() }
+        openSockets += endpoint
         try {
-            val firstBuffer = ByteArray(64 * 1024)
-            val firstCount = try { conn.read(firstBuffer).toInt() } catch (_: Exception) { -1 }
-            if (firstCount <= 0) return
-            val firstBytes = firstBuffer.copyOfRange(0, firstCount)
+            val firstBytes = if (dstPort == 443) {
+                TlsClientHelloParser.readRecord { buffer -> conn.read(buffer).toInt() }
+            } else {
+                val buffer = ByteArray(32 * 1024)
+                val count = conn.read(buffer).toInt()
+                if (count <= 0) return
+                buffer.copyOf(count)
+            }
+            CaptureStatus.transferred(firstBytes.size)
             val host = if (dstPort == 443) {
                 TlsClientHelloParser.parseSni(firstBytes, 0, firstBytes.size) ?: dstIp
             } else dstIp
@@ -166,14 +188,13 @@ class NetstackForwarder(
                     while (!stopped.get() && !closed.get()) {
                         val n = try { conn.read(buffer).toInt() } catch (_: Exception) { -1 }
                         if (n <= 0) break
+                        CaptureStatus.transferred(n)
                         proxyOut.write(buffer, 0, n)
                         proxyOut.flush()
                     }
                 } catch (_: Exception) {
                 } finally {
-                    closed.set(true)
                     runCatching { socket.shutdownOutput() }
-                    runCatching { conn.close() }
                 }
             }.apply { name = "Meerkat-Proxy-Up"; isDaemon = true }
 
@@ -183,12 +204,13 @@ class NetstackForwarder(
                     while (!stopped.get() && !closed.get()) {
                         val n = proxyIn.read(buffer)
                         if (n <= 0) break
+                        CaptureStatus.transferred(n)
                         conn.write(if (n == buffer.size) buffer else buffer.copyOfRange(0, n))
                     }
                 } catch (_: Exception) {
                 } finally {
                     closed.set(true)
-                    runCatching { socket.shutdownInput() }
+                    runCatching { socket.close() }
                     runCatching { conn.close() }
                 }
             }.apply { name = "Meerkat-Proxy-Down"; isDaemon = true }
@@ -197,11 +219,14 @@ class NetstackForwarder(
             download.start()
             upload.join()
             download.join()
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            CaptureStatus.failure()
+            Log.w("MeerkatRelay", "Upstream relay failed", error)
         } finally {
             runCatching { conn.close() }
             runCatching { socket.close() }
             openSockets -= socket
+            openSockets -= endpoint
         }
     }
     private fun relayUdp(dstIp: String, dstPort: Int, conn: UDPConn) {
@@ -210,6 +235,8 @@ class NetstackForwarder(
         // Such traffic is passed through rather than inspected.
         val socket = DatagramSocket(null)
         openSockets += socket
+        val endpoint = java.io.Closeable { conn.close() }
+        openSockets += endpoint
         try {
             if (!vpnService.protect(socket)) return
             socket.reuseAddress = true
@@ -221,11 +248,13 @@ class NetstackForwarder(
                 try {
                     while (!stopped.get() && !closed.get()) {
                         val data = try { conn.receive() } catch (_: Exception) { null } ?: break
+                        CaptureStatus.transferred(data.size)
                         socket.send(DatagramPacket(data, data.size))
                     }
                 } catch (_: Exception) {
                 } finally {
                     closed.set(true)
+                    runCatching { socket.close() }
                     runCatching { conn.close() }
                 }
             }.apply { name = "Meerkat-UDP-Up"; isDaemon = true }
@@ -240,11 +269,13 @@ class NetstackForwarder(
                         } catch (_: SocketTimeoutException) {
                             break
                         }
+                        CaptureStatus.transferred(packet.length)
                         conn.send(packet.data.copyOfRange(packet.offset, packet.offset + packet.length))
                     }
                 } catch (_: Exception) {
                 } finally {
                     closed.set(true)
+                    runCatching { socket.close() }
                     runCatching { conn.close() }
                 }
             }.apply { name = "Meerkat-UDP-Down"; isDaemon = true }
@@ -253,11 +284,15 @@ class NetstackForwarder(
             download.start()
             upload.join()
             download.join()
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            CaptureStatus.failure()
+            Log.w("MeerkatRelay", "Upstream relay failed", error)
         } finally {
             runCatching { conn.close() }
             runCatching { socket.close() }
             openSockets -= socket
+            openSockets -= endpoint
         }
     }
 }
+

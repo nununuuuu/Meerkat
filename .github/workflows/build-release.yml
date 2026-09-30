@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [ main, "rebuild/mobile-parity" ]
+    branches: [ main, "rebuild/mobile-parity", "fix/**" ]
     paths:
       - "app/**"
       - "*.gradle.kts"
@@ -57,8 +57,8 @@ jobs:
         with:
           gradle-version: "9.6.0"
 
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
+      - name: Test and build debug APK
+        run: gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -66,4 +66,5 @@ jobs:
           name: meerkat-development-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
 

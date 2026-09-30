@@ -39,6 +39,15 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import com.resourcesniffer.app.capture.CaptureStatus
+import com.resourcesniffer.app.capture.CaptureSnapshot
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
@@ -92,16 +101,19 @@ import org.json.JSONArray
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<MainViewModel>()
     private val incomingUrl = mutableStateOf<String?>(null)
+    private val resourceRequest = mutableStateOf(0L)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         incomingUrl.value = extractUrl(intent)
-        setContent { MeerkatApp(viewModel, incomingUrl.value) }
+        if (intent.getBooleanExtra("open_resources", false)) resourceRequest.value = System.nanoTime()
+        setContent { MeerkatApp(viewModel, incomingUrl.value, resourceRequest.value) }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (intent.getBooleanExtra("open_resources", false)) resourceRequest.value = System.nanoTime()
         incomingUrl.value = extractUrl(intent)
     }
 
@@ -141,6 +153,7 @@ private fun Resource.uiCategory(): UiResourceCategory = when (type) {
 private fun MeerkatApp(
     viewModel: MainViewModel,
     incomingUrl: String?,
+    resourceRequest: Long,
 ) {
     val context = LocalContext.current
     val resources by viewModel.resources.collectAsStateWithLifecycle()
@@ -148,11 +161,17 @@ private fun MeerkatApp(
     val currentSession by viewModel.currentSession.collectAsStateWithLifecycle()
     val browserSession by viewModel.browserSession.collectAsStateWithLifecycle()
     val externalSession by viewModel.externalSession.collectAsStateWithLifecycle()
-    val externalCaptureActive = externalSession != null
+    val captureStatus by CaptureStatus.state.collectAsStateWithLifecycle()
+    val externalCaptureActive = captureStatus.running
     var mode by remember { mutableStateOf(if (incomingUrl != null) MainMode.BROWSER else MainMode.RESOURCES) }
     var address by remember { mutableStateOf(incomingUrl.orEmpty()) }
     var webView by remember { mutableStateOf<WebView?>(null) }
+    var blockQuic by remember { mutableStateOf(false) }
     var mitmCaInstalled by remember { mutableStateOf(viewModel.isMitmCaInstalled()) }
+
+    androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+        mitmCaInstalled = viewModel.isMitmCaInstalled()
+    }
 
     val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     val caSettingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -165,7 +184,7 @@ private fun MeerkatApp(
     }
 
     val beginGlobalCapture: () -> Unit = {
-        viewModel.startExternalCapture()
+        viewModel.startExternalCapture(blockQuic)
         if (Settings.canDrawOverlays(context)) {
             viewModel.startOverlay()
         } else {
@@ -191,6 +210,10 @@ private fun MeerkatApp(
         }
     }
 
+    LaunchedEffect(resourceRequest) {
+        if (resourceRequest != 0L) mode = MainMode.RESOURCES
+    }
+
     BackHandler(enabled = mode == MainMode.BROWSER && webView?.canGoBack() == true) {
         webView?.goBack()
     }
@@ -198,7 +221,7 @@ private fun MeerkatApp(
     MeerkatTheme {
         Scaffold(
             topBar = {
-                CenterAlignedTopAppBar(
+                if (mode != MainMode.BROWSER) CenterAlignedTopAppBar(
                     title = {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text("Meerkat", fontWeight = FontWeight.SemiBold)
@@ -247,7 +270,7 @@ private fun MeerkatApp(
             Box(
                 Modifier
                     .padding(padding)
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .padding(horizontal = if (mode == MainMode.BROWSER) 0.dp else 14.dp, vertical = if (mode == MainMode.BROWSER) 0.dp else 8.dp)
                     .fillMaxSize(),
             ) {
                 // Keep the browser in composition: tab changes must not recreate its
@@ -268,6 +291,9 @@ private fun MeerkatApp(
                     MainMode.BROWSER -> Unit
                     MainMode.EXTERNAL -> ExternalAppPane(
                         captureActive = externalCaptureActive,
+                        captureStatus = captureStatus,
+                        blockQuic = blockQuic,
+                        onBlockQuicChange = { blockQuic = it },
                         onStart = {
                             if (Build.VERSION.SDK_INT >= 33) {
                                 notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -712,6 +738,7 @@ private fun installBrowserCapture(webView: WebView) {
 }
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 private fun BrowserPane(
     visible: Boolean,
     incomingUrl: String?,
@@ -724,6 +751,10 @@ private fun BrowserPane(
     onOpenResources: () -> Unit,
     onClear: () -> Unit,
 ) {
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    var showResources by remember { mutableStateOf(false) }
+    var resourceCategory by remember { mutableStateOf<UiResourceCategory?>(null) }
     var localAddress by remember { mutableStateOf(address) }
     var activeUrl by remember { mutableStateOf(address.takeIf { it.isNotBlank() }) }
     var webView by remember { mutableStateOf<WebView?>(null) }
@@ -757,6 +788,19 @@ private fun BrowserPane(
     val documentCount = liveResources.count { it.uiCategory() == UiResourceCategory.DOCUMENT }
     val otherCount = liveResources.count { it.uiCategory() == UiResourceCategory.OTHER }
 
+    val navigate = {
+        if (localAddress.isNotBlank()) {
+            val url = normalizeUrl(localAddress)
+            localAddress = url
+            activeUrl = url
+            onAddressChange(url)
+            pageError = null
+            webView?.loadBrowserUrl(url)
+            focusManager.clearFocus()
+            keyboard?.hide()
+        }
+    }
+
     Column(
         modifier = Modifier.fillMaxSize().layout { measurable, constraints ->
             val placeable = measurable.measure(constraints)
@@ -766,77 +810,22 @@ private fun BrowserPane(
         },
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = MaterialTheme.shapes.medium,
-            tonalElevation = 1.dp,
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    OutlinedTextField(
-                        value = localAddress,
-                        onValueChange = {
-                            localAddress = it
-                            onAddressChange(it)
-                        },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true,
-                        placeholder = { Text("輸入網址") },
-                    )
-                    Button(
-                        enabled = localAddress.isNotBlank(),
-                        onClick = {
-                            val url = normalizeUrl(localAddress)
-                            localAddress = url
-                            activeUrl = url
-                            onAddressChange(url)
-                            pageError = null
-                            webView?.loadBrowserUrl(url)
-                        },
-                    ) { Text("開啟") }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(
-                        onClick = { webView?.goBack() },
-                        enabled = webView?.canGoBack() == true,
-                    ) {
-                        Icon(Icons.Default.ArrowBack, "上一頁")
-                    }
-                    IconButton(
-                        onClick = { webView?.goForward() },
-                        enabled = webView?.canGoForward() == true,
-                    ) {
-                        Icon(Icons.Default.ArrowForward, "下一頁")
-                    }
-                    IconButton(
-                        onClick = { webView?.reload() },
-                        enabled = webView?.url != null,
-                    ) {
-                        Icon(Icons.Default.Refresh, "重新整理")
-                    }
-                    Text(
-                        text = "圖片 $imageCount · 影片 $videoCount · 文件 $documentCount · 其他 $otherCount",
-                        modifier = Modifier.weight(1f),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                    )
-                    IconButton(onClick = onClear, enabled = resources.isNotEmpty()) {
-                        Icon(Icons.Default.Delete, "清除資源")
-                    }
-                    TextButton(onClick = onOpenResources) { Text("資源") }
-                }
+            OutlinedTextField(
+                value = localAddress,
+                onValueChange = { localAddress = it },
+                modifier = Modifier.weight(1f),
+                singleLine = true,
+                placeholder = { Text("搜尋或輸入網址") },
+                shape = MaterialTheme.shapes.extraLarge,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
+                keyboardActions = KeyboardActions(onGo = { navigate() }),
+            )
+            IconButton(onClick = { navigate() }, enabled = localAddress.isNotBlank()) {
+                Icon(Icons.Default.ArrowForward, "前往")
             }
         }
 
@@ -1102,12 +1091,65 @@ private fun BrowserPane(
                 },
             )
         }
+        Surface(tonalElevation = 2.dp) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { webView?.goBack() }, enabled = webView?.canGoBack() == true) {
+                    Icon(Icons.Default.ArrowBack, "上一頁")
+                }
+                IconButton(onClick = { webView?.goForward() }, enabled = webView?.canGoForward() == true) {
+                    Icon(Icons.Default.ArrowForward, "下一頁")
+                }
+                IconButton(onClick = { if (loading) webView?.stopLoading() else webView?.reload() },
+                    enabled = webView?.url != null) {
+                    Icon(Icons.Default.Refresh, if (loading) "停止載入" else "重新整理")
+                }
+                TextButton(onClick = { showResources = true }) { Text("資源 ${liveResources.size}") }
+            }
+        }
+    }
+    if (visible && showResources) {
+        ModalBottomSheet(onDismissRequest = { showResources = false }) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("本頁資源 ${liveResources.size}", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                    IconButton(onClick = onClear, enabled = liveResources.isNotEmpty()) {
+                        Icon(Icons.Default.Delete, "清除資源")
+                    }
+                    TextButton(onClick = { showResources = false; onOpenResources() }) { Text("全部") }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf(UiResourceCategory.IMAGE to imageCount, UiResourceCategory.VIDEO to videoCount,
+                        UiResourceCategory.DOCUMENT to documentCount, UiResourceCategory.OTHER to otherCount)
+                        .forEach { (category, count) ->
+                            FilterChip(
+                                selected = resourceCategory == category,
+                                onClick = { resourceCategory = if (resourceCategory == category) null else category },
+                                label = { Text(category.label + "\n" + count) },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                }
+                val filtered = liveResources.filter { resourceCategory == null || it.uiCategory() == resourceCategory }
+                if (filtered.isEmpty()) {
+                    Text("尚未找到資源，瀏覽網頁或播放影片後會自動加入。", Modifier.padding(vertical = 24.dp))
+                } else {
+                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(filtered, key = { it.id }) { ResourceRow(it) }
+                    }
+                }
+            }
+        }
     }
 }
 
 @Composable
 private fun ExternalAppPane(
     captureActive: Boolean,
+    captureStatus: CaptureSnapshot,
+    blockQuic: Boolean,
+    onBlockQuicChange: (Boolean) -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
     caInstalled: Boolean,
@@ -1115,9 +1157,10 @@ private fun ExternalAppPane(
     onInstallCa: () -> Unit,
 ) {
     Column(
-        Modifier.fillMaxSize(),
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        Text(captureStatus.summary(), style = MaterialTheme.typography.bodyMedium)
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,
@@ -1158,15 +1201,25 @@ private fun ExternalAppPane(
             }
         }
 
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("嘗試 TCP 嗅探（停用 HTTP/3）")
+                Text("部分 App 會改用 HTTPS；若無法載入，關閉此選項再重新開始。仍無法解密憑證釘選。",
+                    style = MaterialTheme.typography.bodySmall)
+            }
+            Switch(checked = blockQuic, onCheckedChange = onBlockQuicChange,
+                enabled = !captureActive && !captureStatus.starting && caInstalled)
+        }
+
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Button(
                 onClick = onStart,
-                enabled = !captureActive,
+                enabled = !captureActive && !captureStatus.starting,
             ) {
-                Text(if (caInstalled) "開始全域 HTTPS 嗅探" else "開始全域嗅探")
+                Text(if (captureStatus.starting) "啟動中…" else if (caInstalled) "開始全域 HTTPS 嗅探" else "開始全域嗅探")
             }
             OutlinedButton(
                 onClick = onStop,
@@ -2121,7 +2174,10 @@ private fun sameBrowserTarget(a: String?, b: String?): Boolean {
 
 private fun normalizeUrl(value: String): String {
     val trimmed = value.trim()
-    if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed
+    if (trimmed.startsWith("http://", true) || trimmed.startsWith("https://", true)) return trimmed
+    if (trimmed.any { it.isWhitespace() } || (!trimmed.contains(".") && !trimmed.contains(":"))) {
+        return "https://www.google.com/search?q=" + Uri.encode(trimmed)
+    }
     return "https://$trimmed"
 }
 
@@ -2143,4 +2199,5 @@ private fun formatBytes(value: Long): String = when {
     value >= 1024L -> "%.1f KB".format(value / 1024.0)
     else -> "$value B"
 }
+
 
