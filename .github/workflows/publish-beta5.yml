@@ -1,0 +1,63 @@
+name: Publish beta5 Release
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/publish-beta5.yml"]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: publish-meerkat-beta5
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download tested APK
+        uses: actions/download-artifact@v4
+        with:
+          name: meerkat-development-apk
+          run-id: 36748253329
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: release-assets
+
+      - name: Verify and prepare release assets
+        working-directory: release-assets
+        run: |
+          printf '%s\n' 'a7a2db117501cd7219191569690f613cfb560e25d0b71f295fd1b1df4508a071  app-debug.apk' | sha256sum --check
+          mv app-debug.apk Meerkat-v0.6.0-beta5-debug.apk
+          sha256sum Meerkat-v0.6.0-beta5-debug.apk > Meerkat-v0.6.0-beta5-debug.apk.sha256
+
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cat > release-notes.md <<'NOTES'
+          Meerkat v0.6.0-beta5
+
+          Changes:
+          - Redesigned the browser with an address/search bar and bottom navigation controls.
+          - Moved resource counts into an expandable sheet with all four categories: Images, Videos, Documents, Other.
+          - Added IPv6 routing to global VPN capture.
+          - Reassembled TLS ClientHello records across TCP reads and enabled HTTP/1.1 inspection when ALPN is absent.
+          - Reported VPN readiness only after startup and exposed connection, traffic, decryption, HTTP/3, and failure counts.
+          - Improved floating-panel status, resource-page navigation, and connection cleanup.
+          - Kept resource deduplication within each capture session.
+          - Added an optional TCP inspection mode that disables UDP/443 to test HTTPS fallback.
+
+          Validation:
+          - JVM unit tests and debug APK build passed in Actions run 36748253329.
+          - This release uses the exact APK from that successful build, verified by SHA-256.
+
+          Known limitations:
+          - Installing a user CA does not bypass certificate pinning or apps that reject user-installed CAs. IG/Facebook/Threads capture still needs on-device validation.
+          - QUIC/HTTP3 passes through without decryption by default. The optional TCP mode may affect app loading; turn it off and restart capture if needed.
+          - DRM/CENC content is not decrypted.
+          NOTES
+          gh release create v0.6.0-beta5             release-assets/Meerkat-v0.6.0-beta5-debug.apk             release-assets/Meerkat-v0.6.0-beta5-debug.apk.sha256             --target a203f3728e63303e88e3338614db08017ee6d9e8             --title 'Meerkat v0.6.0-beta5'             --prerelease             --notes-file release-notes.md
