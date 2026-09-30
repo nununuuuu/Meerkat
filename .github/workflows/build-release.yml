@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -60,12 +60,6 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Prepare release asset
-        if: github.ref == 'refs/heads/main'
-        run: |
-          cp app/build/outputs/apk/debug/app-debug.apk Meerkat-v0.6.0-beta3-debug.apk
-          sha256sum Meerkat-v0.6.0-beta3-debug.apk > Meerkat-v0.6.0-beta3-debug.apk.sha256
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -73,29 +67,3 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
-      - name: Publish v0.6.0-beta3
-        if: github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cat > release-notes.md <<'EOF'
-          Meerkat v0.6.0-beta3
-
-          Changes since beta2:
-          - Fixed global capture lifecycle so the VPN capture session remains alive outside Meerkat.
-          - Kept browser capture and global capture state independent to avoid UI/session conflicts.
-          - Improved global capture network compatibility with active-network DNS preservation, QUIC pass-through, and safer HTTP/2 handling.
-          - Fixed HTTPS MITM protocol symmetry to reduce breakage in captured apps.
-          - Reworked the built-in browser interaction so pages can scroll and receive input normally while sniffing.
-          - Reduced the top resource panel footprint and kept the resource categories as lightweight filters rather than oversized controls.
-          - Improved detected resource labels so entries show meaningful names instead of only file sizes where possible.
-          - Switched video preview playback to Media3 and repaired preview controls/content rendering.
-          - Kept the floating counter and panel synchronized with the same live capture session.
-          - Removed the obsolete app-list permission from global capture.
-
-          Notes:
-          - Apps that reject user-installed CAs or use certificate pinning may still be opaque to HTTPS MITM without root/hooking.
-          - DRM/CENC content is detected but not decrypted.
-          EOF
-
-          gh release create v0.6.0-beta3             Meerkat-v0.6.0-beta3-debug.apk             Meerkat-v0.6.0-beta3-debug.apk.sha256             --repo "$GITHUB_REPOSITORY"             --target "$GITHUB_SHA"             --title "Meerkat v0.6.0-beta3"             --prerelease             --notes-file release-notes.md
