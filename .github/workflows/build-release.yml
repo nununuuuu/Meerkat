@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -67,4 +67,35 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
+      - name: Publish beta6 Release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p release-assets
+          cp app/build/outputs/apk/debug/app-debug.apk release-assets/Meerkat-v0.6.0-beta6-debug.apk
+          cd release-assets
+          sha256sum Meerkat-v0.6.0-beta6-debug.apk > Meerkat-v0.6.0-beta6-debug.apk.sha256
+          cat > notes.md <<'NOTES'
+          Meerkat v0.6.0-beta6
 
+          - Improved CA detection using both the certificate store and configured trust managers. An unreadable store entry no longer stops the scan.
+          - Added explicit confirmation when the current exported CA is installed but automatic detection fails. Confirmation is tied to the current CA fingerprint; restart capture after confirming.
+          - Removed the CA gate from the HTTP/3 compatibility switch and enabled toggling while capture runs.
+          - Moved the floating-ball on/off switch to the App tab, independently of starting/stopping capture.
+          - Centered resource category labels and counts in separate rows.
+          - Added a Home button beside Reload to return to the empty browser start screen without deleting captured resources.
+          - Adopted a fixed development signing identity so future beta upgrades preserve app-local CA keys and history.
+
+          Validation: JVM tests and APK build passed before publishing this APK.
+
+          Installation: older betas used ephemeral CI debug signatures. If Android reports a signature conflict, a one-time reinstall may be necessary; export/install the new CA afterward. Future builds using this development identity can update in place.
+
+          A user-installed CA still does not bypass another app's certificate pinning or trust restrictions. HTTP/3 is not decrypted; the compatibility option tries TCP fallback.
+          NOTES
+          if gh release view v0.6.0-beta6 >/dev/null 2>&1; then
+            echo 'beta6 is already published; leaving its assets unchanged.'
+          else
+            gh release create v0.6.0-beta6 Meerkat-v0.6.0-beta6-debug.apk Meerkat-v0.6.0-beta6-debug.apk.sha256 --target "$GITHUB_SHA" --title 'Meerkat v0.6.0-beta6' --prerelease --notes-file notes.md
+          fi

@@ -15,8 +15,19 @@ android {
         applicationId = "com.resourcesniffer.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 13
-        versionName = "0.6.0-beta5"
+        versionCode = 14
+        versionName = "0.6.0-beta6"
+    }
+
+    // Public development identity: keep test APK upgrades compatible so local
+    // CA keys and capture history survive updates. Not a production signing key.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = rootProject.file("signing/development.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildFeatures {

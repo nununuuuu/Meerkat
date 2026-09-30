@@ -29,11 +29,12 @@ class NetstackForwarder(
     private val sourcePackage: String?,
     private val sourceName: String?,
     private val localProxyPort: Int? = null,
-    private val blockQuic: Boolean = false,
+    @Volatile private var blockQuic: Boolean = false,
 ) {
     private val executor = Executors.newCachedThreadPool()
     private val stopped = AtomicBoolean(false)
     private val openSockets = ConcurrentHashMap.newKeySet<java.io.Closeable>()
+    private val quicSockets = ConcurrentHashMap.newKeySet<java.io.Closeable>()
     @Volatile private var tunnel: Tunnel? = null
 
     fun start(tunFd: Int, mtu: Int = 1500) {
@@ -71,12 +72,18 @@ class NetstackForwarder(
         tunnel = Bridge.newTunnel(tunFd.toLong(), mtu.toLong(), "RELAY", handler)
     }
 
+    fun setBlockQuic(enabled: Boolean) {
+        blockQuic = enabled
+        if (enabled) quicSockets.toList().forEach { runCatching { it.close() } }
+    }
+
     fun stop() {
         if (!stopped.compareAndSet(false, true)) return
         runCatching { tunnel?.stop() }
         tunnel = null
         openSockets.toList().forEach { runCatching { it.close() } }
         openSockets.clear()
+        quicSockets.clear()
         executor.shutdownNow()
     }
 
@@ -230,14 +237,18 @@ class NetstackForwarder(
         }
     }
     private fun relayUdp(dstIp: String, dstPort: Int, conn: UDPConn) {
-        // Compatibility first: never black-hole UDP/443. Apps that prefer
-        // QUIC/HTTP3 must remain usable even when Meerkat cannot decrypt it.
-        // Such traffic is passed through rather than inspected.
+        // UDP/443 passes through by default. The explicit TCP compatibility
+        // option can close these associations and block new ones.
         val socket = DatagramSocket(null)
         openSockets += socket
         val endpoint = java.io.Closeable { conn.close() }
         openSockets += endpoint
+        if (dstPort == 443) {
+            quicSockets += socket
+            quicSockets += endpoint
+        }
         try {
+            if (dstPort == 443 && blockQuic) return
             if (!vpnService.protect(socket)) return
             socket.reuseAddress = true
             socket.soTimeout = 60_000
@@ -292,6 +303,8 @@ class NetstackForwarder(
             runCatching { socket.close() }
             openSockets -= socket
             openSockets -= endpoint
+            quicSockets -= socket
+            quicSockets -= endpoint
         }
     }
 }

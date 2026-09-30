@@ -30,6 +30,8 @@ import java.security.cert.X509Certificate
 import java.security.spec.PKCS8EncodedKeySpec
 import java.util.Date
 import java.util.concurrent.ConcurrentHashMap
+import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.X509TrustManager
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 
@@ -106,15 +108,36 @@ class MitmCertificateAuthority(private val context: Context) {
     fun isInstalledInAndroidCaStore(): Boolean {
         val own = runCatching { ensureCa().encoded }.getOrNull() ?: return false
         val ownHash = sha256(own)
-        return runCatching {
+        // Some devices fail on individual aliases; one unreadable entry must not
+        // hide a matching certificate elsewhere in the store.
+        val storeMatch = runCatching {
             val store = KeyStore.getInstance("AndroidCAStore").apply { load(null) }
             val aliases = store.aliases()
             while (aliases.hasMoreElements()) {
-                val cert = store.getCertificate(aliases.nextElement()) as? X509Certificate ?: continue
-                if (MessageDigest.isEqual(ownHash, sha256(cert.encoded))) return true
+                val alias = aliases.nextElement()
+                val cert = runCatching { store.getCertificate(alias) as? X509Certificate }.getOrNull()
+                    ?: continue
+                if (MessageDigest.isEqual(ownHash, sha256(cert.encoded))) return@runCatching true
             }
             false
         }.getOrDefault(false)
+        if (storeMatch) return true
+        return runCatching {
+            val factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+            factory.init(null as KeyStore?)
+            factory.trustManagers.filterIsInstance<X509TrustManager>().any { manager ->
+                manager.acceptedIssuers.any { MessageDigest.isEqual(ownHash, sha256(it.encoded)) }
+            }
+        }.getOrDefault(false)
+    }
+
+    fun isManuallyConfirmed(): Boolean =
+        context.getSharedPreferences("mitm-settings", Context.MODE_PRIVATE)
+            .getString("confirmed-ca", null) == fingerprintSha256()
+
+    fun confirmInstalled() {
+        context.getSharedPreferences("mitm-settings", Context.MODE_PRIVATE).edit()
+            .putString("confirmed-ca", fingerprintSha256()).apply()
     }
 
     fun fingerprintSha256(): String = sha256(ensureCa().encoded)
@@ -195,3 +218,4 @@ class MitmCertificateAuthority(private val context: Context) {
 
     private fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)
 }
+

@@ -57,6 +57,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Apps
@@ -94,6 +95,7 @@ import com.resourcesniffer.app.download.DownloadRecord
 import com.resourcesniffer.app.download.DownloadQuality
 import com.resourcesniffer.app.download.DownloadRegistry
 import com.resourcesniffer.app.download.DownloadState
+import com.resourcesniffer.app.overlay.OverlayService
 import com.resourcesniffer.app.ui.MainViewModel
 import com.resourcesniffer.app.ui.theme.MeerkatTheme
 import org.json.JSONArray
@@ -167,34 +169,42 @@ private fun MeerkatApp(
     var address by remember { mutableStateOf(incomingUrl.orEmpty()) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var blockQuic by remember { mutableStateOf(false) }
+    val overlayRunning by OverlayService.running.collectAsStateWithLifecycle()
+    var overlayWanted by remember { mutableStateOf(false) }
+    var manualCaConfirmed by remember { mutableStateOf(viewModel.isMitmCaManuallyConfirmed()) }
+    var showCaConfirmation by remember { mutableStateOf(false) }
     var mitmCaInstalled by remember { mutableStateOf(viewModel.isMitmCaInstalled()) }
 
     androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
         mitmCaInstalled = viewModel.isMitmCaInstalled()
+        manualCaConfirmed = viewModel.isMitmCaManuallyConfirmed()
     }
 
     val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     val caSettingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         mitmCaInstalled = viewModel.isMitmCaInstalled()
+        manualCaConfirmed = viewModel.isMitmCaManuallyConfirmed()
     }
     val overlayLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        if (Settings.canDrawOverlays(context)) {
+        if (overlayWanted && Settings.canDrawOverlays(context)) {
             viewModel.startOverlay()
+        }
+    }
+
+    val setOverlay: (Boolean) -> Unit = { enabled ->
+        overlayWanted = enabled
+        if (!enabled) {
+            viewModel.stopOverlay()
+        } else if (Settings.canDrawOverlays(context)) {
+            viewModel.startOverlay()
+        } else {
+            overlayLauncher.launch(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:${context.packageName}")))
         }
     }
 
     val beginGlobalCapture: () -> Unit = {
         viewModel.startExternalCapture(blockQuic)
-        if (Settings.canDrawOverlays(context)) {
-            viewModel.startOverlay()
-        } else {
-            overlayLauncher.launch(
-                Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:${context.packageName}"),
-                )
-            )
-        }
     }
 
     val vpnLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -219,6 +229,21 @@ private fun MeerkatApp(
     }
 
     MeerkatTheme {
+        if (showCaConfirmation) {
+            AlertDialog(
+                onDismissRequest = { showCaConfirmation = false },
+                title = { Text("確認已安裝目前的 CA") },
+                text = { Text("請確認安裝的是本版本匯出的 Meerkat-Local-CA.crt。重新安裝 App 後，舊憑證可能已不相符。確認後請重新開始全域嗅探。手動確認不代表其他 App 一定信任憑證。") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        viewModel.confirmMitmCaInstalled()
+                        manualCaConfirmed = true
+                        showCaConfirmation = false
+                    }) { Text("已安裝，啟用嘗試") }
+                },
+                dismissButton = { TextButton(onClick = { showCaConfirmation = false }) { Text("取消") } },
+            )
+        }
         Scaffold(
             topBar = {
                 if (mode != MainMode.BROWSER) CenterAlignedTopAppBar(
@@ -293,7 +318,14 @@ private fun MeerkatApp(
                         captureActive = externalCaptureActive,
                         captureStatus = captureStatus,
                         blockQuic = blockQuic,
-                        onBlockQuicChange = { blockQuic = it },
+                        onBlockQuicChange = {
+                            blockQuic = it
+                            if (captureStatus.running) viewModel.updateBlockQuic(it)
+                        },
+                        overlayRunning = overlayRunning,
+                        onOverlayChange = setOverlay,
+                        caManuallyConfirmed = manualCaConfirmed,
+                        onConfirmCa = { showCaConfirmation = true },
                         onStart = {
                             if (Build.VERSION.SDK_INT >= 33) {
                                 notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -333,18 +365,6 @@ private fun MeerkatApp(
                         resources = resources,
                         currentSessionId = currentSession?.id,
                         onClear = viewModel::clear,
-                        onEnableOverlay = {
-                            if (!Settings.canDrawOverlays(context)) {
-                                context.startActivity(
-                                    Intent(
-                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                        Uri.parse("package:${context.packageName}")
-                                    )
-                                )
-                            } else {
-                                viewModel.startOverlay()
-                            }
-                        },
                     )
                     MainMode.DOWNLOADS -> DownloadsPane(downloads)
                 }
@@ -744,7 +764,7 @@ private fun BrowserPane(
     incomingUrl: String?,
     address: String,
     onAddressChange: (String) -> Unit,
-    onWebViewReady: (WebView) -> Unit,
+    onWebViewReady: (WebView?) -> Unit,
     viewModel: MainViewModel,
     resources: List<Resource>,
     currentSessionId: Long?,
@@ -1028,6 +1048,7 @@ private fun BrowserPane(
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
+                                if (view !== webView) return
                                 loading = false
                                 url?.let {
                                     localAddress = it
@@ -1104,6 +1125,21 @@ private fun BrowserPane(
                     enabled = webView?.url != null) {
                     Icon(Icons.Default.Refresh, if (loading) "停止載入" else "重新整理")
                 }
+                IconButton(onClick = {
+                    val previousView = webView
+                    webView = null
+                    onWebViewReady(null)
+                    previousView?.stopLoading()
+                    activeUrl = null
+                    localAddress = ""
+                    onAddressChange("")
+                    pageError = null
+                    loading = false
+                    progress = 0
+                    focusManager.clearFocus()
+                    keyboard?.hide()
+                    showResources = false
+                }) { Icon(Icons.Default.Home, "首頁") }
                 TextButton(onClick = { showResources = true }) { Text("資源 ${liveResources.size}") }
             }
         }
@@ -1112,7 +1148,7 @@ private fun BrowserPane(
         ModalBottomSheet(onDismissRequest = { showResources = false }) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("本頁資源 ${liveResources.size}", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                    Text("瀏覽器資源 ${liveResources.size}", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
                     IconButton(onClick = onClear, enabled = liveResources.isNotEmpty()) {
                         Icon(Icons.Default.Delete, "清除資源")
                     }
@@ -1122,12 +1158,24 @@ private fun BrowserPane(
                     listOf(UiResourceCategory.IMAGE to imageCount, UiResourceCategory.VIDEO to videoCount,
                         UiResourceCategory.DOCUMENT to documentCount, UiResourceCategory.OTHER to otherCount)
                         .forEach { (category, count) ->
-                            FilterChip(
-                                selected = resourceCategory == category,
+                            Surface(
                                 onClick = { resourceCategory = if (resourceCategory == category) null else category },
-                                label = { Text(category.label + "\n" + count) },
                                 modifier = Modifier.weight(1f),
-                            )
+                                shape = MaterialTheme.shapes.medium,
+                                color = if (resourceCategory == category) MaterialTheme.colorScheme.secondaryContainer
+                                    else MaterialTheme.colorScheme.surface,
+                                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                            ) {
+                                Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 10.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(category.label, style = MaterialTheme.typography.labelLarge,
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                                    Text(count.toString(), style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                                }
+                            }
                         }
                 }
                 val filtered = liveResources.filter { resourceCategory == null || it.uiCategory() == resourceCategory }
@@ -1150,6 +1198,10 @@ private fun ExternalAppPane(
     captureStatus: CaptureSnapshot,
     blockQuic: Boolean,
     onBlockQuicChange: (Boolean) -> Unit,
+    overlayRunning: Boolean,
+    onOverlayChange: (Boolean) -> Unit,
+    caManuallyConfirmed: Boolean,
+    onConfirmCa: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
     caInstalled: Boolean,
@@ -1177,9 +1229,11 @@ private fun ExternalAppPane(
                 )
                 Text(
                     if (caInstalled) {
-                        "HTTPS 深度嗅探已就緒：Meerkat Local CA 已安裝。"
+                        "已核對目前的 Meerkat Local CA，可嘗試 HTTPS 嗅探。"
+                    } else if (caManuallyConfirmed) {
+                        "你已手動確認安裝 CA；系統尚未能自動核對，將嘗試 HTTPS 嗅探。"
                     } else {
-                        "尚未安裝 Meerkat Local CA。Android 11+ 不允許一般 App 直接安裝 CA；Meerkat 會先把憑證匯出到 Downloads，再帶你到系統安全設定完成安裝。"
+                        "尚未偵測到目前的 Meerkat Local CA。如果你已安裝，可以手動確認；若曾移除並重裝 App，請重新匯出及安裝目前的憑證。"
                     },
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -1187,6 +1241,7 @@ private fun ExternalAppPane(
                     OutlinedButton(onClick = onInstallCa) {
                         Text("匯出 CA 並開啟設定")
                     }
+                    TextButton(onClick = onConfirmCa) { Text("我已安裝目前的 CA") }
                 }
                 Text(
                     "CA SHA-256：" + caFingerprint,
@@ -1204,11 +1259,11 @@ private fun ExternalAppPane(
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("嘗試 TCP 嗅探（停用 HTTP/3）")
-                Text("部分 App 會改用 HTTPS；若無法載入，關閉此選項再重新開始。仍無法解密憑證釘選。",
+                Text("可以在嗅探中切換，部分 App 會改用 HTTPS；若無法載入請關閉。仍無法解密憑證釘選。",
                     style = MaterialTheme.typography.bodySmall)
             }
             Switch(checked = blockQuic, onCheckedChange = onBlockQuicChange,
-                enabled = !captureActive && !captureStatus.starting && caInstalled)
+                enabled = !captureStatus.starting)
         }
 
         Row(
@@ -1219,7 +1274,7 @@ private fun ExternalAppPane(
                 onClick = onStart,
                 enabled = !captureActive && !captureStatus.starting,
             ) {
-                Text(if (captureStatus.starting) "啟動中…" else if (caInstalled) "開始全域 HTTPS 嗅探" else "開始全域嗅探")
+                Text(if (captureStatus.starting) "啟動中…" else if (caInstalled || caManuallyConfirmed) "開始全域 HTTPS 嗅探" else "開始全域嗅探")
             }
             OutlinedButton(
                 onClick = onStop,
@@ -1233,6 +1288,15 @@ private fun ExternalAppPane(
                     label = { Text("背景嗅探中") },
                 )
             }
+        }
+
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("懸浮球")
+                Text("在其他 App 上顯示嗅探狀態與資源數量。關閉懸浮球不會停止嗅探。",
+                    style = MaterialTheme.typography.bodySmall)
+            }
+            Switch(checked = overlayRunning, onCheckedChange = onOverlayChange)
         }
 
         if (captureActive) {
@@ -1258,7 +1322,6 @@ private fun ResourcePane(
     resources: List<Resource>,
     currentSessionId: Long?,
     onClear: () -> Unit,
-    onEnableOverlay: () -> Unit,
 ) {
     val context = LocalContext.current
     var selectedCategory by remember { mutableStateOf<UiResourceCategory?>(null) }
@@ -1311,7 +1374,6 @@ private fun ResourcePane(
                 Spacer(Modifier.width(4.dp))
                 Text("清空歷史")
             }
-            OutlinedButton(onClick = onEnableOverlay) { Text("啟用懸浮球") }
             OutlinedButton(onClick = {
                 selectionMode = !selectionMode
                 if (!selectionMode) selectedIds = emptySet()

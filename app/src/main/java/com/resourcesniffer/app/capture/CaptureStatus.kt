@@ -7,6 +7,7 @@ data class CaptureSnapshot(
     val running: Boolean = false,
     val starting: Boolean = false,
     val httpsEnabled: Boolean = false,
+    val blockQuic: Boolean = false,
     val connections: Long = 0,
     val bytes: Long = 0,
     val quicConnections: Long = 0,
@@ -21,8 +22,8 @@ data class CaptureSnapshot(
         !running -> "全域嗅探已停止"
         connections == 0L -> "VPN 已啟動，等待其他 App 的新連線"
         else -> "已收到 $connections 條連線 · ${bytes / 1024} KB\n" +
-            "HTTPS 已解析 $decryptedConnections · 無法解密 $opaqueTlsConnections · HTTP/3 $quicConnections\n轉送失敗 $failures" +
-            if (!httpsEnabled) "\n尚未安裝 CA：HTTPS 只能轉送，無法取得資源網址" else ""
+            "HTTPS 已解析 $decryptedConnections · 無法解密 $opaqueTlsConnections · HTTP/3 $quicConnections（${if (blockQuic) "已停用" else "轉送中"}）\n轉送失敗 $failures" +
+            if (!httpsEnabled) "\n本次未啟用 HTTPS 解密：加密流量只會轉送，無法取得資源網址" else ""
     }
 }
 
@@ -35,6 +36,7 @@ object CaptureStatus {
     @Synchronized fun started(https: Boolean) {
         mutable.value = mutable.value.copy(starting = false, running = true, httpsEnabled = https)
     }
+    @Synchronized fun quicMode(enabled: Boolean) { mutable.value = mutable.value.copy(blockQuic = enabled) }
     @Synchronized fun stopped(error: String? = null) {
         mutable.value = mutable.value.copy(starting = false, running = false, error = error)
     }

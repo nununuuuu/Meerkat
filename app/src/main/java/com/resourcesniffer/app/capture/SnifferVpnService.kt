@@ -18,6 +18,7 @@ class SnifferVpnService : VpnService() {
 
     companion object {
         const val ACTION_START = "com.resourcesniffer.app.START_CAPTURE"
+        const val ACTION_UPDATE_QUIC = "com.resourcesniffer.app.UPDATE_QUIC"
         const val ACTION_STOP = "com.resourcesniffer.app.STOP_CAPTURE"
         const val EXTRA_BLOCK_QUIC = "block_quic"
         const val EXTRA_ENABLE_HTTPS_MITM = "enable_https_mitm"
@@ -32,6 +33,11 @@ class SnifferVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> stopCapture()
+            ACTION_UPDATE_QUIC -> {
+                val block = intent?.getBooleanExtra(EXTRA_BLOCK_QUIC, false) == true
+                forwarder?.setBlockQuic(block)
+                CaptureStatus.quicMode(block)
+            }
             else -> startCapture(
                 intent?.getBooleanExtra(EXTRA_ENABLE_HTTPS_MITM, false) == true,
                 intent?.getBooleanExtra(EXTRA_BLOCK_QUIC, false) == true,
@@ -87,12 +93,13 @@ class SnifferVpnService : VpnService() {
                 localProxy = proxy
                 proxy.start()
             } else null
-            val engine = NetstackForwarder(this, null, targetName, proxyPort, blockQuic && enableHttpsMitm)
+            val engine = NetstackForwarder(this, null, targetName, proxyPort, blockQuic)
             forwarder = engine
 
             SessionStore.startExternal(targetPackage = null, targetName = targetName)
             engine.start(fd, 1500)
             CaptureStatus.started(enableHttpsMitm)
+            CaptureStatus.quicMode(blockQuic)
         } catch (error: Throwable) {
             Log.e("MeerkatVPN", "Unable to start capture", error)
             stopCapture(error.message ?: error.javaClass.simpleName)

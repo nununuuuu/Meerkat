@@ -1,5 +1,6 @@
 package com.resourcesniffer.app.overlay
 
+import kotlinx.coroutines.flow.asStateFlow
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -30,6 +31,8 @@ import com.resourcesniffer.app.repository.SessionStore
 
 class OverlayService : Service() {
     companion object {
+        private val mutableRunning = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val running = mutableRunning.asStateFlow()
         private const val CHANNEL_ID = "sniffer_overlay"
         private const val NOTIFICATION_ID = 1002
     }
@@ -84,6 +87,7 @@ class OverlayService : Service() {
         )
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         showBubble()
+        mutableRunning.value = true
         handler.post(updateCount)
     }
 
@@ -269,6 +273,7 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        mutableRunning.value = false
         handler.removeCallbacks(updateCount)
         hidePanel()
         bubble?.let { runCatching { windowManager.removeView(it) } }
