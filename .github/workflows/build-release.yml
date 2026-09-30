@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -60,12 +60,6 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Prepare release asset
-        if: github.ref == 'refs/heads/main'
-        run: |
-          cp app/build/outputs/apk/debug/app-debug.apk Meerkat-v0.6.0-beta4-debug.apk
-          sha256sum Meerkat-v0.6.0-beta4-debug.apk > Meerkat-v0.6.0-beta4-debug.apk.sha256
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -73,30 +67,3 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
-      - name: Publish v0.6.0-beta4
-        if: github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cat > release-notes.md <<'EOF'
-          Meerkat v0.6.0-beta4
-
-          Fixes in this build:
-          - Browser screen no longer opens as a blank white page.
-          - URL input and browser controls remain visible before any page is loaded.
-          - Empty browser starts with no preset homepage and no preset URL prefix.
-          - WebView is created only after a URL is entered, improving touch/scroll reliability.
-          - Browser resource counters remain compact text instead of large category buttons.
-          - Deep-link attempts are treated as background app links rather than page-load errors.
-          - Media preview uses Media3/ExoPlayer instead of the old VideoView controller.
-          - Resource cards prioritize filenames/URL names, with size/resolution moved to metadata.
-          - Global capture sessions, floating counter, and resource panel are kept on the same session.
-          - Global capture compatibility improvements include active-network DNS, QUIC passthrough, and symmetric HTTP/1.1 MITM negotiation.
-
-          Notes:
-          - QUIC/HTTP3 traffic is passed through for compatibility and is not decrypted by the current inspector.
-          - Apps that reject user-installed CAs or use certificate pinning may remain opaque to HTTPS MITM.
-          - DRM/CENC content is not decrypted.
-          EOF
-
-          gh release create v0.6.0-beta4             Meerkat-v0.6.0-beta4-debug.apk             Meerkat-v0.6.0-beta4-debug.apk.sha256             --repo "$GITHUB_REPOSITORY"             --target "$GITHUB_SHA"             --title "Meerkat v0.6.0-beta4"             --prerelease             --notes-file release-notes.md
