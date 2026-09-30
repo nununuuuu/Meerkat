@@ -1293,7 +1293,7 @@ private fun ExternalAppPane(
                 captureStatus.decryptedConnections == 0L && captureStatus.failures > 0L ->
                     "尚無 HTTPS 連線成功解析，且已有 ${captureStatus.failures} 次轉送失敗。請查看上方的最近失敗類型；這不一定是憑證問題。"
                 captureStatus.decryptedConnections == 0L && captureStatus.quicConnections > 0L ->
-                    "流量可能仍走 HTTP/3。可開啟「嘗試 TCP 嗅探」，再讓目標 App 重新建立連線。"
+                    "目標 App 的流量可能走 HTTP/3，目前只能轉送。若開啟「嘗試 TCP 嗅探」後頁面無法載入，請把同一個貼文網址貼到 Meerkat 內建瀏覽器，重新載入影片。"
                 captureStatus.decryptedConnections > 0L ->
                     "已解析 HTTPS，但目前沒有辨識到可下載的媒體網址。請在目標 App 播放影片或載入圖片後再查看。"
                 else -> "已收到連線，但尚未收到可解析的 HTTP 資源。請讓目標 App 重新載入內容。"

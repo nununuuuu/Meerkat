@@ -349,7 +349,7 @@ class OverlayService : Service() {
             val status = CaptureStatus.state.value
             val hint = if (status.running && status.httpsEnabled &&
                 status.decryptedConnections == 0L && status.quicConnections > 0L) {
-                "\n目前尚未解析 HTTPS；HTTP/3 流量只能轉送，無法取得資源網址。"
+                "\n目前尚未解析 HTTPS；HTTP/3 流量只能轉送。可將貼文網址貼到 Meerkat 內建瀏覽器重試。"
             } else ""
             return status.summary() + "\n尚未找到可下載資源" + hint
         }
