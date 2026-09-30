@@ -39,7 +39,9 @@ class OverlayService : Service() {
 
     private lateinit var windowManager: WindowManager
     private var bubble: TextView? = null
+    private var bubbleParams: WindowManager.LayoutParams? = null
     private var panel: View? = null
+    private var panelParams: WindowManager.LayoutParams? = null
     private var lastSessionId = 0L
     private val handler = Handler(Looper.getMainLooper())
 
@@ -137,6 +139,8 @@ class OverlayService : Service() {
         var downX = 0f
         var downY = 0f
         var moved = false
+        var panelStartX = 0
+        var panelStartY = 0
 
         view.setOnTouchListener { _, event ->
             when (event.action) {
@@ -145,6 +149,8 @@ class OverlayService : Service() {
                     lastY = params.y
                     downX = event.rawX
                     downY = event.rawY
+                    panelStartX = panelParams?.x ?: 0
+                    panelStartY = panelParams?.y ?: 0
                     moved = false
                     true
                 }
@@ -155,6 +161,17 @@ class OverlayService : Service() {
                     params.x = lastX - dx.toInt()
                     params.y = lastY + dy.toInt()
                     windowManager.updateViewLayout(view, params)
+                    panelParams?.let { position ->
+                        panel?.let { panelView ->
+                            position.x = (panelStartX - dx.toInt()).coerceIn(
+                                0, (resources.displayMetrics.widthPixels - panelView.width).coerceAtLeast(0),
+                            )
+                            position.y = (panelStartY + dy.toInt()).coerceIn(
+                                0, (resources.displayMetrics.heightPixels - panelView.height).coerceAtLeast(0),
+                            )
+                            windowManager.updateViewLayout(panelView, position)
+                        }
+                    }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
@@ -167,6 +184,7 @@ class OverlayService : Service() {
 
         windowManager.addView(view, params)
         bubble = view
+        bubbleParams = params
     }
 
     private fun togglePanel() {
@@ -254,17 +272,37 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.END
-            x = 18
-            y = (100*density).toInt()
+            x = bubbleParams?.x ?: 18
+            y = bubbleParams?.y ?: (100*density).toInt()
         }
 
         windowManager.addView(layout, params)
         panel = layout
+        panelParams = params
+        layout.post {
+            if (panel === layout) {
+                params.x = params.x.coerceIn(0, (resources.displayMetrics.widthPixels - layout.width).coerceAtLeast(0))
+                params.y = params.y.coerceIn(0, (resources.displayMetrics.heightPixels - layout.height).coerceAtLeast(0))
+                windowManager.updateViewLayout(layout, params)
+            }
+        }
+        // The bubble must stay touchable while the larger panel is open.
+        bubble?.let { bubbleView ->
+            bubbleParams?.let { bubblePosition ->
+                handler.post {
+                    if (panel === layout && bubble === bubbleView) {
+                        windowManager.removeViewImmediate(bubbleView)
+                        windowManager.addView(bubbleView, bubblePosition)
+                    }
+                }
+            }
+        }
     }
 
     private fun hidePanel() {
         panel?.let { runCatching { windowManager.removeView(it) } }
         panel = null
+        panelParams = null
     }
 
     private fun buildSummary(items: List<com.resourcesniffer.app.core.Resource>): String {
@@ -292,6 +330,7 @@ class OverlayService : Service() {
         hidePanel()
         bubble?.let { runCatching { windowManager.removeView(it) } }
         bubble = null
+        bubbleParams = null
         super.onDestroy()
     }
 
