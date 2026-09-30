@@ -42,6 +42,7 @@ class OverlayService : Service() {
     private var bubbleParams: WindowManager.LayoutParams? = null
     private var panel: View? = null
     private var panelParams: WindowManager.LayoutParams? = null
+    private var panelCorner: OverlayCorner? = null
     private var lastSessionId = 0L
     private val handler = Handler(Looper.getMainLooper())
 
@@ -158,19 +159,20 @@ class OverlayService : Service() {
                     val dx = event.rawX - downX
                     val dy = event.rawY - downY
                     if (kotlin.math.abs(dx) > 8 || kotlin.math.abs(dy) > 8) moved = true
-                    params.x = lastX - dx.toInt()
-                    params.y = lastY + dy.toInt()
-                    windowManager.updateViewLayout(view, params)
-                    panelParams?.let { position ->
-                        panel?.let { panelView ->
-                            position.x = (panelStartX - dx.toInt()).coerceIn(
-                                0, (resources.displayMetrics.widthPixels - panelView.width).coerceAtLeast(0),
+                    val panelView = panel
+                    val corner = panelCorner
+                    if (panelView != null && corner != null) {
+                        movePanelAndBubble(
+                            OverlayGeometry.place(
+                                panelStartX - dx.toInt(), panelStartY + dy.toInt(), corner,
+                                panelView.width, panelView.height, params.width,
+                                resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels,
                             )
-                            position.y = (panelStartY + dy.toInt()).coerceIn(
-                                0, (resources.displayMetrics.heightPixels - panelView.height).coerceAtLeast(0),
-                            )
-                            windowManager.updateViewLayout(panelView, position)
-                        }
+                        )
+                    } else {
+                        params.x = lastX - dx.toInt()
+                        params.y = lastY + dy.toInt()
+                        windowManager.updateViewLayout(view, params)
                     }
                     true
                 }
@@ -189,6 +191,24 @@ class OverlayService : Service() {
 
     private fun togglePanel() {
         if (panel != null) hidePanel() else showPanel()
+    }
+
+    private fun movePanelAndBubble(position: OverlayPosition) {
+        val panelView = panel ?: return
+        val panelLayout = panelParams ?: return
+        val bubbleView = bubble ?: return
+        val bubbleLayout = bubbleParams ?: return
+        panelCorner = position.corner
+        if (panelLayout.x != position.panelX || panelLayout.y != position.panelY) {
+            panelLayout.x = position.panelX
+            panelLayout.y = position.panelY
+            windowManager.updateViewLayout(panelView, panelLayout)
+        }
+        if (bubbleLayout.x != position.bubbleX || bubbleLayout.y != position.bubbleY) {
+            bubbleLayout.x = position.bubbleX
+            bubbleLayout.y = position.bubbleY
+            windowManager.updateViewLayout(bubbleView, bubbleLayout)
+        }
     }
 
     private fun showPanel() {
@@ -265,7 +285,7 @@ class OverlayService : Service() {
         layout.addView(bottomActions)
 
         val params = WindowManager.LayoutParams(
-            minOf((320*density).toInt(), resources.displayMetrics.widthPixels - (32*density).toInt()),
+            minOf((320*density).toInt(), resources.displayMetrics.widthPixels - (58*density).toInt()),
             WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
@@ -281,9 +301,27 @@ class OverlayService : Service() {
         panelParams = params
         layout.post {
             if (panel === layout) {
-                params.x = params.x.coerceIn(0, (resources.displayMetrics.widthPixels - layout.width).coerceAtLeast(0))
-                params.y = params.y.coerceIn(0, (resources.displayMetrics.heightPixels - layout.height).coerceAtLeast(0))
-                windowManager.updateViewLayout(layout, params)
+                val bubbleLayout = bubbleParams ?: return@post
+                movePanelAndBubble(
+                    OverlayGeometry.openAtBubble(
+                        bubbleLayout.x, bubbleLayout.y, layout.width, layout.height, bubbleLayout.width,
+                        resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels,
+                    )
+                )
+            }
+        }
+        layout.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+            val corner = panelCorner
+            if (panel === layout && corner != null &&
+                (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop)) {
+                val bubbleLayout = bubbleParams ?: return@addOnLayoutChangeListener
+                movePanelAndBubble(
+                    OverlayGeometry.place(
+                        params.x, params.y, corner,
+                        layout.width, layout.height, bubbleLayout.width,
+                        resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels,
+                    )
+                )
             }
         }
         // The bubble must stay touchable while the larger panel is open.
@@ -303,11 +341,17 @@ class OverlayService : Service() {
         panel?.let { runCatching { windowManager.removeView(it) } }
         panel = null
         panelParams = null
+        panelCorner = null
     }
 
     private fun buildSummary(items: List<com.resourcesniffer.app.core.Resource>): String {
         if (items.isEmpty()) {
-            return CaptureStatus.state.value.summary() + "\n尚未找到可下載資源"
+            val status = CaptureStatus.state.value
+            val hint = if (status.running && status.httpsEnabled &&
+                status.decryptedConnections == 0L && status.quicConnections > 0L) {
+                "\n目前尚未解析 HTTPS；HTTP/3 流量只能轉送，無法取得資源網址。"
+            } else ""
+            return status.summary() + "\n尚未找到可下載資源" + hint
         }
         val imageCount = items.count { it.type == ResourceType.IMAGE }
         val videoCount = items.count {
