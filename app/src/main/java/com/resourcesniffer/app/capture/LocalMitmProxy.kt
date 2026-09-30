@@ -1,6 +1,7 @@
 package com.resourcesniffer.app.capture
 
 import android.net.VpnService
+import android.util.Log
 import java.io.File
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -64,7 +65,9 @@ class LocalMitmProxy(
             val port = parts[3].toIntOrNull() ?: return
             if (port == 443) handleTls(client, host, dstIp, port)
             else handlePlain(client, BufferedInputStream(rawInput), dstIp, port)
-        } catch (_: Throwable) {
+        } catch (error: Throwable) {
+            CaptureStatus.failure("本機代理：${error.javaClass.simpleName}")
+            Log.w("MeerkatProxy", "Proxy connection failed", error)
         } finally {
             sockets -= client
             runCatching { client.close() }

@@ -80,8 +80,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -90,6 +92,7 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceType
+import com.resourcesniffer.app.core.StreamType
 import com.resourcesniffer.app.download.DownloadHelper
 import com.resourcesniffer.app.download.DownloadRecord
 import com.resourcesniffer.app.download.DownloadQuality
@@ -318,6 +321,7 @@ private fun MeerkatApp(
                     MainMode.EXTERNAL -> ExternalAppPane(
                         captureActive = externalCaptureActive,
                         captureStatus = captureStatus,
+                        resourceCount = resources.count { it.sessionId == externalSession?.id },
                         blockQuic = blockQuic,
                         inspectHttps = inspectHttps,
                         onInspectHttpsChange = { inspectHttps = it },
@@ -1259,6 +1263,7 @@ private fun BrowserPane(
 private fun ExternalAppPane(
     captureActive: Boolean,
     captureStatus: CaptureSnapshot,
+    resourceCount: Int,
     blockQuic: Boolean,
     inspectHttps: Boolean,
     onInspectHttpsChange: (Boolean) -> Unit,
@@ -1278,6 +1283,24 @@ private fun ExternalAppPane(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(captureStatus.summary(), style = MaterialTheme.typography.bodyMedium)
+        Text("本次找到 $resourceCount 項資源", style = MaterialTheme.typography.bodyMedium)
+        if (captureStatus.running && captureStatus.connections > 0 && resourceCount == 0) {
+            val hint = when {
+                !captureStatus.httpsEnabled ->
+                    "目前只轉送 HTTPS 加密流量，無法從中讀取媒體網址。請安裝目前的 CA、啟用「嘗試 HTTPS 解密」，再重新開始嗅探。"
+                captureStatus.decryptedConnections == 0L && captureStatus.opaqueTlsConnections > 0L ->
+                    "已有加密連線無法解密。目標 App 可能不信任使用者 CA 或使用憑證釘選；停用 HTTP/3 也無法解除此限制。"
+                captureStatus.decryptedConnections == 0L && captureStatus.failures > 0L ->
+                    "尚無 HTTPS 連線成功解析，且已有 ${captureStatus.failures} 次轉送失敗。請查看上方的最近失敗類型；這不一定是憑證問題。"
+                captureStatus.decryptedConnections == 0L && captureStatus.quicConnections > 0L ->
+                    "流量可能仍走 HTTP/3。可開啟「嘗試 TCP 嗅探」，再讓目標 App 重新建立連線。"
+                captureStatus.decryptedConnections > 0L ->
+                    "已解析 HTTPS，但目前沒有辨識到可下載的媒體網址。請在目標 App 播放影片或載入圖片後再查看。"
+                else -> "已收到連線，但尚未收到可解析的 HTTP 資源。請讓目標 App 重新載入內容。"
+            }
+            Text(hint, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,
@@ -1886,30 +1909,43 @@ private fun ResourcePreviewDialog(
 
                     ResourceType.VIDEO, ResourceType.AUDIO, ResourceType.STREAM -> {
                         val context = LocalContext.current
-                        val headers = remember(resource.id) {
+                        val mediaUrl = resource.localCachePath
+                            ?.takeIf { File(it).isFile }
+                            ?.let { Uri.fromFile(File(it)) }
+                            ?: Uri.parse(resource.finalUrl ?: url)
+                        val headers = remember(resource.id, mediaUrl, resource.cookie) {
                             buildMap {
                                 resource.userAgent?.takeIf { it.isNotBlank() }?.let { put("User-Agent", it) }
                                 resource.referer?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
-                                resource.cookie?.takeIf { it.isNotBlank() }?.let { put("Cookie", it) }
+                                (resource.cookie?.takeIf { it.isNotBlank() }
+                                    ?: runCatching { CookieManager.getInstance().getCookie(mediaUrl.toString()) }.getOrNull())
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let { put("Cookie", it) }
                             }
                         }
-                        val player = remember(resource.id) {
+                        val player = remember(resource.id, mediaUrl, headers) {
                             val dataSourceFactory = DefaultHttpDataSource.Factory()
                                 .setAllowCrossProtocolRedirects(true)
                                 .setDefaultRequestProperties(headers)
                             ExoPlayer.Builder(context)
                                 .setMediaSourceFactory(
                                     DefaultMediaSourceFactory(context)
-                                        .setDataSourceFactory(dataSourceFactory)
+                                        .setDataSourceFactory(DefaultDataSource.Factory(context, dataSourceFactory))
                                 )
                                 .build()
                                 .apply {
                                     addListener(object : Player.Listener {
                                         override fun onPlayerError(error: PlaybackException) {
-                                            previewError = "媒體預覽失敗：${error.errorCodeName}"
+                                            previewError = previewFailureMessage(error)
                                         }
                                     })
-                                    setMediaItem(MediaItem.fromUri(url))
+                                    val item = MediaItem.Builder().setUri(mediaUrl)
+                                    when (resource.streamType) {
+                                        StreamType.HLS -> item.setMimeType(MimeTypes.APPLICATION_M3U8)
+                                        StreamType.DASH -> item.setMimeType(MimeTypes.APPLICATION_MPD)
+                                        else -> Unit
+                                    }
+                                    setMediaItem(item.build())
                                     prepare()
                                     playWhenReady = false
                                 }
@@ -1956,6 +1992,18 @@ private fun ResourcePreviewDialog(
             }
         },
     )
+}
+
+private fun previewFailureMessage(error: PlaybackException): String = when (error.errorCode) {
+    PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ->
+        "無法解析這個媒體網址。它可能是需要播放清單的影片片段，或連結已失效。請選擇同一影片的 M3U8、MPD 或完整影片檔。"
+    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
+        "媒體伺服器拒絕預覽要求；請重新開啟來源頁面，取得有效連結後再試。"
+    PlaybackException.ERROR_CODE_DECODING_FAILED,
+    PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ->
+        "此裝置不支援這部影片的編碼格式。"
+    else -> "媒體預覽失敗：${error.errorCodeName}"
 }
 
 @Composable

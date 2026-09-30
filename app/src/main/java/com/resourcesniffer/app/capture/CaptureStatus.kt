@@ -14,6 +14,7 @@ data class CaptureSnapshot(
     val opaqueTlsConnections: Long = 0,
     val decryptedConnections: Long = 0,
     val failures: Long = 0,
+    val lastFailure: String? = null,
     val error: String? = null,
 ) {
     fun summary(): String = when {
@@ -22,7 +23,8 @@ data class CaptureSnapshot(
         !running -> "全域嗅探已停止"
         connections == 0L -> "VPN 已啟動，等待其他 App 的新連線"
         else -> "已收到 $connections 條連線 · ${bytes / 1024} KB\n" +
-            "HTTPS 已解析 $decryptedConnections · 無法解密 $opaqueTlsConnections · HTTP/3 $quicConnections（${if (blockQuic) "已停用" else "轉送中"}）\n轉送失敗 $failures" +
+            "HTTPS 已解析 $decryptedConnections · ${if (httpsEnabled) "無法解密" else "HTTPS 未檢查"} $opaqueTlsConnections · HTTP/3 $quicConnections（${if (blockQuic) "已停用" else "轉送中"}）\n轉送失敗 $failures" +
+            (lastFailure?.let { " · 最近：$it" } ?: "") +
             if (!httpsEnabled) "\n本次未啟用 HTTPS 解密：加密流量只會轉送，無法取得資源網址" else ""
     }
 }
@@ -55,7 +57,10 @@ object CaptureStatus {
     @Synchronized fun opaqueTls() {
         mutable.value = mutable.value.copy(opaqueTlsConnections = mutable.value.opaqueTlsConnections + 1)
     }
-    @Synchronized fun failure() {
-        mutable.value = mutable.value.copy(failures = mutable.value.failures + 1)
+    @Synchronized fun failure(reason: String? = null) {
+        mutable.value = mutable.value.copy(
+            failures = mutable.value.failures + 1,
+            lastFailure = reason ?: mutable.value.lastFailure,
+        )
     }
 }
