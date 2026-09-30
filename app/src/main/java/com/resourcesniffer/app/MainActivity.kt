@@ -716,13 +716,16 @@ private fun BrowserPane(
     onOpenResources: () -> Unit,
 ) {
     var localAddress by remember { mutableStateOf(address) }
+    var activeUrl by remember { mutableStateOf(address.takeIf { it.isNotBlank() }) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var loading by remember { mutableStateOf(false) }
     var progress by remember { mutableIntStateOf(0) }
     var pageError by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(address) {
-        if (address.isNotBlank() && address != localAddress) localAddress = address
+        if (address != localAddress && address.isNotBlank()) {
+            localAddress = address
+        }
     }
 
     val liveResources = remember(resources, currentSessionId) {
@@ -735,62 +738,83 @@ private fun BrowserPane(
     val otherCount = liveResources.count { it.uiCategory() == UiResourceCategory.OTHER }
 
     Column(
-        Modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Row(
+        Surface(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            shape = MaterialTheme.shapes.medium,
+            tonalElevation = 1.dp,
         ) {
-            OutlinedTextField(
-                value = localAddress,
-                onValueChange = {
-                    localAddress = it
-                    onAddressChange(it)
-                },
-                modifier = Modifier.weight(1f),
-                singleLine = true,
-                placeholder = { Text("輸入網址") },
-            )
-            Button(
-                enabled = localAddress.isNotBlank(),
-                onClick = {
-                    val url = normalizeUrl(localAddress)
-                    localAddress = url
-                    onAddressChange(url)
-                    pageError = null
-                    webView?.loadUrl(url)
-                },
-            ) { Text("開啟") }
-        }
+            Column(
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = localAddress,
+                        onValueChange = {
+                            localAddress = it
+                            onAddressChange(it)
+                        },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        placeholder = { Text("輸入網址") },
+                    )
+                    Button(
+                        enabled = localAddress.isNotBlank(),
+                        onClick = {
+                            val url = normalizeUrl(localAddress)
+                            localAddress = url
+                            activeUrl = url
+                            onAddressChange(url)
+                            pageError = null
+                            webView?.loadUrl(url)
+                        },
+                    ) { Text("開啟") }
+                }
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = { webView?.goBack() }, enabled = webView?.canGoBack() == true) {
-                Icon(Icons.Default.ArrowBack, "上一頁")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(
+                        onClick = { webView?.goBack() },
+                        enabled = webView?.canGoBack() == true,
+                    ) {
+                        Icon(Icons.Default.ArrowBack, "上一頁")
+                    }
+                    IconButton(
+                        onClick = { webView?.goForward() },
+                        enabled = webView?.canGoForward() == true,
+                    ) {
+                        Icon(Icons.Default.ArrowForward, "下一頁")
+                    }
+                    IconButton(
+                        onClick = { webView?.reload() },
+                        enabled = webView?.url != null,
+                    ) {
+                        Icon(Icons.Default.Refresh, "重新整理")
+                    }
+                    Text(
+                        text = "圖片 $imageCount · 影片 $videoCount · 文件 $documentCount · 其他 $otherCount",
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                    TextButton(onClick = onOpenResources) { Text("資源") }
+                }
             }
-            IconButton(onClick = { webView?.goForward() }, enabled = webView?.canGoForward() == true) {
-                Icon(Icons.Default.ArrowForward, "下一頁")
-            }
-            IconButton(onClick = { webView?.reload() }, enabled = webView?.url != null) {
-                Icon(Icons.Default.Refresh, "重新整理")
-            }
-            Text(
-                text = "圖片 $imageCount · 影片 $videoCount · 文件 $documentCount · 其他 $otherCount",
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-            )
-            TextButton(onClick = onOpenResources) { Text("資源") }
         }
 
         if (loading) {
             LinearProgressIndicator(
-                progress = { (progress.coerceIn(0, 100)) / 100f },
+                progress = { progress.coerceIn(0, 100) / 100f },
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -810,183 +834,205 @@ private fun BrowserPane(
             }
         }
 
-        AndroidView(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-            factory = { ctx ->
-                WebView(ctx).apply {
-                    webView = this
-                    onWebViewReady(this)
-                    setBackgroundColor(android.graphics.Color.WHITE)
-                    isFocusable = true
-                    isFocusableInTouchMode = true
+        if (activeUrl.isNullOrBlank()) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "輸入網址開始瀏覽與嗅探",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        } else {
+            AndroidView(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        webView = this
+                        onWebViewReady(this)
+                        setBackgroundColor(android.graphics.Color.WHITE)
+                        isFocusable = true
+                        isFocusableInTouchMode = true
+                        requestFocus()
 
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.databaseEnabled = true
-                    settings.mediaPlaybackRequiresUserGesture = false
-                    settings.loadsImagesAutomatically = true
-                    settings.blockNetworkImage = false
-                    settings.useWideViewPort = true
-                    settings.loadWithOverviewMode = false
-                    settings.setSupportZoom(true)
-                    settings.builtInZoomControls = true
-                    settings.displayZoomControls = false
-                    settings.javaScriptCanOpenWindowsAutomatically = true
-                    settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.databaseEnabled = true
+                        settings.mediaPlaybackRequiresUserGesture = false
+                        settings.loadsImagesAutomatically = true
+                        settings.blockNetworkImage = false
+                        settings.useWideViewPort = true
+                        settings.loadWithOverviewMode = false
+                        settings.setSupportZoom(true)
+                        settings.builtInZoomControls = true
+                        settings.displayZoomControls = false
+                        settings.javaScriptCanOpenWindowsAutomatically = true
+                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
 
-                    addJavascriptInterface(
-                        BrowserCaptureBridge(ctx, viewModel, settings.userAgentString),
-                        "MeerkatCapture",
-                    )
-                    val hasDocumentStart = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
-                    if (hasDocumentStart) {
-                        WebViewCompat.addDocumentStartJavaScript(
-                            this,
-                            browserCaptureScript(),
-                            setOf("*"),
+                        addJavascriptInterface(
+                            BrowserCaptureBridge(ctx, viewModel, settings.userAgentString),
+                            "MeerkatCapture",
                         )
-                    }
-
-                    CookieManager.getInstance().setAcceptCookie(true)
-                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-
-                    webChromeClient = object : WebChromeClient() {
-                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                            progress = newProgress
-                            loading = newProgress in 0..99
-                            super.onProgressChanged(view, newProgress)
-                        }
-                    }
-
-                    webViewClient = object : WebViewClient() {
-                        override fun shouldOverrideUrlLoading(
-                            view: WebView?,
-                            request: WebResourceRequest?,
-                        ): Boolean {
-                            val req = request ?: return false
-                            val raw = req.url.toString()
-                            val scheme = req.url.scheme?.lowercase()
-                            val currentUrl = view?.url
-
-                            if (scheme == "http" || scheme == "https") {
-                                if (isInstagramHost(currentUrl) && isInstagramStoreUrl(raw)) return true
-                                return false
-                            }
-
-                            // Background app/deep-link attempts are silently blocked. Only a
-                            // real user tap may be converted back to a safe web URL.
-                            if (req.hasGesture()) {
-                                val fallback = resolveBrowsableUrl(raw)
-                                if (
-                                    !fallback.isNullOrBlank() &&
-                                    !isInstagramStoreUrl(fallback) &&
-                                    !sameBrowserTarget(currentUrl, fallback)
-                                ) {
-                                    localAddress = fallback
-                                    onAddressChange(fallback)
-                                    view?.loadUrl(fallback)
-                                }
-                            }
-                            return true
-                        }
-
-                        override fun shouldInterceptRequest(
-                            view: WebView?,
-                            request: WebResourceRequest?,
-                        ): android.webkit.WebResourceResponse? {
-                            val req = request ?: return null
-                            val url = req.url.toString()
-                            if (url.startsWith("http://", true) || url.startsWith("https://", true)) {
-                                viewModel.recordWebResource(
-                                    url = url,
-                                    mimeType = null,
-                                    requestHeaders = req.requestHeaders.orEmpty(),
-                                )
-                            }
-                            return null
-                        }
-
-                        override fun onPageStarted(
-                            view: WebView?,
-                            url: String?,
-                            favicon: android.graphics.Bitmap?,
-                        ) {
-                            loading = true
-                            pageError = null
-                            if (!hasDocumentStart) {
-                                view?.post { if (view.isAttachedToWindow) installBrowserCapture(view) }
-                            }
-                            super.onPageStarted(view, url, favicon)
-                        }
-
-                        override fun onReceivedError(
-                            view: WebView?,
-                            request: WebResourceRequest?,
-                            error: WebResourceError?,
-                        ) {
-                            val scheme = request?.url?.scheme?.lowercase()
-                            if (request?.isForMainFrame == true && (scheme == "http" || scheme == "https")) {
-                                pageError = "網頁載入失敗：${error?.description ?: "未知錯誤"}"
-                                loading = false
-                            }
-                            super.onReceivedError(view, request, error)
-                        }
-
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            loading = false
-                            url?.let {
-                                localAddress = it
-                                onAddressChange(it)
-                            }
-                            if (!hasDocumentStart) {
-                                view?.post { if (view.isAttachedToWindow) installBrowserCapture(view) }
-                            }
-                            view?.postDelayed({
-                                if (view.isAttachedToWindow) scanDomResources(view, viewModel)
-                            }, 700)
-                            super.onPageFinished(view, url)
-                        }
-
-                        override fun onRenderProcessGone(
-                            view: WebView?,
-                            detail: RenderProcessGoneDetail?,
-                        ): Boolean {
-                            pageError = if (detail?.didCrash() == true) {
-                                "網頁渲染程序崩潰，請重新開啟頁面。"
-                            } else {
-                                "網頁渲染程序被系統終止，請重新開啟頁面。"
-                            }
-                            loading = false
-                            return true
-                        }
-                    }
-
-                    setDownloadListener { url, userAgent, _, mimeType, _ ->
-                        if (!url.isNullOrBlank()) {
-                            viewModel.recordWebResource(
-                                url = url,
-                                mimeType = mimeType,
-                                requestHeaders = mapOf(
-                                    "User-Agent" to (userAgent ?: settings.userAgentString.orEmpty()),
-                                    "Referer" to (this.url ?: ""),
-                                    "Cookie" to (CookieManager.getInstance().getCookie(url) ?: ""),
-                                ),
+                        val hasDocumentStart =
+                            WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+                        if (hasDocumentStart) {
+                            WebViewCompat.addDocumentStartJavaScript(
+                                this,
+                                browserCaptureScript(),
+                                setOf("*"),
                             )
                         }
-                    }
 
-                    if (localAddress.isNotBlank()) {
-                        loadUrl(normalizeUrl(localAddress))
+                        CookieManager.getInstance().setAcceptCookie(true)
+                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                progress = newProgress
+                                loading = newProgress in 0..99
+                                super.onProgressChanged(view, newProgress)
+                            }
+                        }
+
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                            ): Boolean {
+                                val req = request ?: return false
+                                val raw = req.url.toString()
+                                val scheme = req.url.scheme?.lowercase()
+                                val currentUrl = view?.url
+
+                                if (scheme == "http" || scheme == "https") {
+                                    if (isInstagramHost(currentUrl) && isInstagramStoreUrl(raw)) return true
+                                    return false
+                                }
+
+                                // App deep links are not page-load errors. Ignore background
+                                // attempts; only explicit user taps may be converted to web URLs.
+                                if (req.hasGesture()) {
+                                    val fallback = resolveBrowsableUrl(raw)
+                                    if (
+                                        !fallback.isNullOrBlank() &&
+                                        !isInstagramStoreUrl(fallback) &&
+                                        !sameBrowserTarget(currentUrl, fallback)
+                                    ) {
+                                        localAddress = fallback
+                                        activeUrl = fallback
+                                        onAddressChange(fallback)
+                                        view?.loadUrl(fallback)
+                                    }
+                                }
+                                return true
+                            }
+
+                            override fun shouldInterceptRequest(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                            ): android.webkit.WebResourceResponse? {
+                                val req = request ?: return null
+                                val url = req.url.toString()
+                                if (url.startsWith("http://", true) || url.startsWith("https://", true)) {
+                                    viewModel.recordWebResource(
+                                        url = url,
+                                        mimeType = null,
+                                        requestHeaders = req.requestHeaders.orEmpty(),
+                                    )
+                                }
+                                return null
+                            }
+
+                            override fun onPageStarted(
+                                view: WebView?,
+                                url: String?,
+                                favicon: android.graphics.Bitmap?,
+                            ) {
+                                loading = true
+                                pageError = null
+                                super.onPageStarted(view, url, favicon)
+                            }
+
+                            override fun onReceivedError(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                                error: WebResourceError?,
+                            ) {
+                                val scheme = request?.url?.scheme?.lowercase()
+                                if (
+                                    request?.isForMainFrame == true &&
+                                    (scheme == "http" || scheme == "https")
+                                ) {
+                                    pageError = "網頁載入失敗：${error?.description ?: "未知錯誤"}"
+                                    loading = false
+                                }
+                                super.onReceivedError(view, request, error)
+                            }
+
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                loading = false
+                                url?.let {
+                                    localAddress = it
+                                    activeUrl = it
+                                    onAddressChange(it)
+                                }
+                                // Document-start injection already covers supported WebView
+                                // versions. Avoid reinjecting after every media/page lifecycle.
+                                if (!hasDocumentStart) {
+                                    view?.post {
+                                        if (view.isAttachedToWindow) installBrowserCapture(view)
+                                    }
+                                }
+                                view?.postDelayed({
+                                    if (view.isAttachedToWindow) scanDomResources(view, viewModel)
+                                }, 700)
+                                super.onPageFinished(view, url)
+                            }
+
+                            override fun onRenderProcessGone(
+                                view: WebView?,
+                                detail: RenderProcessGoneDetail?,
+                            ): Boolean {
+                                pageError = if (detail?.didCrash() == true) {
+                                    "網頁渲染程序崩潰，請重新開啟頁面。"
+                                } else {
+                                    "網頁渲染程序被系統終止，請重新開啟頁面。"
+                                }
+                                loading = false
+                                webView = null
+                                return true
+                            }
+                        }
+
+                        setDownloadListener { url, userAgent, _, mimeType, _ ->
+                            if (!url.isNullOrBlank()) {
+                                viewModel.recordWebResource(
+                                    url = url,
+                                    mimeType = mimeType,
+                                    requestHeaders = mapOf(
+                                        "User-Agent" to (userAgent ?: settings.userAgentString.orEmpty()),
+                                        "Referer" to (this.url ?: ""),
+                                        "Cookie" to (CookieManager.getInstance().getCookie(url) ?: ""),
+                                    ),
+                                )
+                            }
+                        }
+
+                        loadUrl(activeUrl!!)
                     }
-                }
-            },
-            update = { view ->
-                webView = view
-                onWebViewReady(view)
-            },
-        )
+                },
+                update = { view ->
+                    webView = view
+                    onWebViewReady(view)
+                },
+            )
+        }
     }
 }
 
