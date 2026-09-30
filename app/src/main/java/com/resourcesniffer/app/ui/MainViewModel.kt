@@ -132,7 +132,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun mitmCaFingerprint(): String =
         MitmCertificateAuthority(getApplication<Application>()).fingerprintSha256()
-    fun startExternalCapture(blockQuic: Boolean = false) {
+    fun startExternalCapture(blockQuic: Boolean = false, inspectHttps: Boolean = false) {
         val context = getApplication<Application>()
         ContextCompat.startForegroundService(
             context,
@@ -141,7 +141,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 putExtra(SnifferVpnService.EXTRA_BLOCK_QUIC, blockQuic)
                 putExtra(
                     SnifferVpnService.EXTRA_ENABLE_HTTPS_MITM,
-                    MitmCertificateAuthority(context).let { it.isInstalledInAndroidCaStore() || it.isManuallyConfirmed() },
+                    inspectHttps && MitmCertificateAuthority(context).let { it.isInstalledInAndroidCaStore() || it.isManuallyConfirmed() },
                 )
             }
         )
@@ -165,5 +165,4 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearCurrentSession() = SnifferRepository.clearSession(SessionStore.idOrDefault())
 }
-
 

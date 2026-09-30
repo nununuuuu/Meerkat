@@ -15,8 +15,8 @@ android {
         applicationId = "com.resourcesniffer.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 14
-        versionName = "0.6.0-beta6"
+        versionCode = 15
+        versionName = "0.6.0-beta7"
     }
 
     // Public development identity: keep test APK upgrades compatible so local
@@ -73,4 +73,3 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
-

@@ -63,6 +63,9 @@ jobs:
         with:
           gradle-version: "9.6.0"
 
+      - name: Test browser capture script
+        run: node --test scripts/test-browser-capture.cjs
+
       - name: Test and build debug APK
         run: gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace
 

@@ -169,6 +169,7 @@ private fun MeerkatApp(
     var address by remember { mutableStateOf(incomingUrl.orEmpty()) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var blockQuic by remember { mutableStateOf(false) }
+    var inspectHttps by remember { mutableStateOf(false) }
     val overlayRunning by OverlayService.running.collectAsStateWithLifecycle()
     var overlayWanted by remember { mutableStateOf(false) }
     var manualCaConfirmed by remember { mutableStateOf(viewModel.isMitmCaManuallyConfirmed()) }
@@ -204,7 +205,7 @@ private fun MeerkatApp(
     }
 
     val beginGlobalCapture: () -> Unit = {
-        viewModel.startExternalCapture(blockQuic)
+        viewModel.startExternalCapture(blockQuic, inspectHttps)
     }
 
     val vpnLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -318,6 +319,8 @@ private fun MeerkatApp(
                         captureActive = externalCaptureActive,
                         captureStatus = captureStatus,
                         blockQuic = blockQuic,
+                        inspectHttps = inspectHttps,
+                        onInspectHttpsChange = { inspectHttps = it },
                         onBlockQuicChange = {
                             blockQuic = it
                             if (captureStatus.running) viewModel.updateBlockQuic(it)
@@ -536,7 +539,9 @@ private fun browserCaptureScript(): String = """
           window.__meerkatCaptureInstalled = true;
 
           const MAX_TEXT = 1024 * 1024;
-          const RESOURCE_RE = /(?:https?:\\/\\/[^\\s"\'<>\\\\]+)|(?:["\']?([^"\']+\\.(?:m3u8|mpd|mp4|m4v|webm|mkv|mov|avi|m4a|mp3|aac|flac|ogg|opus|wav|jpg|jpeg|png|webp|gif|avif|bmp|svg|heic|heif|pdf|epub|doc|docx|docm|dot|dotx|xls|xlsx|xlsm|xlsb|ppt|pptx|pptm|pps|ppsx|odt|ods|odp|pages|numbers|key|txt|csv|tsv|rtf|md|zip|rar|7z|tar|gz)(?:\\?[^"\'\\s<>]*)?))/ig;
+          // Kotlin raw strings preserve backslashes: these are JavaScript escapes.
+          const RESOURCE_RE = /https?:\/\/[^\s"'<>\\]+|(?:\/{1,2}|\.\.?\/)?[^\s"'<>\\{}]+?\.(?:m3u8|mpd|mp4|m4v|webm|mkv|mov|avi|m4a|mp3|aac|flac|ogg|opus|wav|jpg|jpeg|png|webp|gif|avif|bmp|svg|heic|heif|pdf|epub|doc|docx|docm|dot|dotx|xls|xlsx|xlsm|xlsb|ppt|pptx|pptm|pps|ppsx|odt|ods|odp|pages|numbers|key|txt|csv|tsv|rtf|md|zip|rar|7z|tar|gz)(?:\?[^\s"'<>\\]*)?/ig;
+          const reported = new Set();
 
           function absolute(value) {
             if (!value) return null;
@@ -546,21 +551,61 @@ private fun browserCaptureScript(): String = """
           function report(value, mime) {
             const url = absolute(value);
             if (!url || (!url.startsWith("http://") && !url.startsWith("https://"))) return;
-            try { MeerkatCapture.resource(url, mime || "", location.href); } catch (_) {}
+            const key = url + "|" + (mime || "");
+            if (reported.has(key)) return;
+            // Bound memory while allowing response MIME to enrich a URL report.
+            if (reported.size >= 4096) reported.clear();
+            try {
+              MeerkatCapture.resource(url, mime || "", location.href);
+              reported.add(key);
+            } catch (_) {}
           }
 
           function scanText(value) {
             if (typeof value !== "string" || !value) return;
             let text = value.length > MAX_TEXT ? value.slice(0, MAX_TEXT) : value;
-            text = text.replace(/\\\\\\//g, "/").replace(/\\\\u002[fF]/g, "/").replace(/&amp;/g, "&");
+            text = text.replace(/\\\//g, "/").replace(/\\u002[fF]/g, "/").replace(/&amp;/g, "&");
             RESOURCE_RE.lastIndex = 0;
             let match, count = 0;
             while ((match = RESOURCE_RE.exec(text)) && count < 256) {
-              const raw = match[0].replace(/^[\'"]|[\'",;)}\\]]+$/g, "");
+              const raw = match[0].replace(/^['"]|['",;)}\]]+$/g, "");
               report(raw, "");
               count++;
             }
           }
+
+          // Player configuration often contains extensionless signed media URLs.
+          function scanJson(value) {
+            let remaining = 1024;
+            const seen = new WeakSet();
+            function visit(item, depth) {
+              if (--remaining < 0 || depth > 12) return;
+              if (typeof item === "string") {
+                scanText(item);
+              } else if (item && typeof item === "object" && !seen.has(item)) {
+                seen.add(item);
+                Object.keys(item).slice(0, 256).forEach(function(key) {
+                  visit(item[key], depth + 1);
+                });
+              }
+            }
+            visit(value, 0);
+          }
+          const originalJsonParse = JSON.parse;
+          JSON.parse = function() {
+            const result = originalJsonParse.apply(this, arguments);
+            try { scanJson(result); } catch (_) {}
+            return result;
+          };
+          try {
+            const originalResponseJson = Response.prototype.json;
+            Response.prototype.json = function() {
+              return originalResponseJson.apply(this, arguments).then(function(value) {
+                try { scanJson(value); } catch (_) {}
+                return value;
+              });
+            };
+          } catch (_) {}
 
           const MAX_BLOB_CAPTURE = 512 * 1024 * 1024;
           const BLOB_CHUNK = 192 * 1024;
@@ -673,7 +718,7 @@ private fun browserCaptureScript(): String = """
           const originalFetch = window.fetch;
           if (originalFetch) {
             window.fetch = function(input, init) {
-              try { report(typeof input === "string" ? input : input && input.url, ""); } catch (_) {}
+              try { report(input instanceof URL ? input.href : typeof input === "string" ? input : input && input.url, ""); } catch (_) {}
               return originalFetch.apply(this, arguments).then(function(response) {
                 try {
                   report(response.url, response.headers && response.headers.get("content-type"));
@@ -702,6 +747,7 @@ private fun browserCaptureScript(): String = """
                 if (this.responseType === "arraybuffer" && this.response) {
                   try { bufferOrigins.set(this.response, {url:this.responseURL || this.__meerkatUrl || "", mime:ct}); } catch (_) {}
                 }
+                if (this.responseType === "json") scanJson(this.response);
                 if ((ct.includes("json") || ct.startsWith("text/") || ct.includes("javascript") || ct.includes("xml")) && typeof this.responseText === "string") {
                   scanText(this.responseText);
                 }
@@ -738,7 +784,8 @@ private fun browserCaptureScript(): String = """
               try { if (node.hasAttribute && node.hasAttribute(attr)) report(node.getAttribute(attr), ""); } catch (_) {}
             });
             try {
-              if (node.srcset) String(node.srcset).split(",").forEach(function(part) { report(part.trim().split(/\\s+/)[0], ""); });
+              if (node.currentSrc) report(node.currentSrc, node.tagName === "IMG" ? "image/*" : node.tagName === "AUDIO" ? "audio/*" : node.tagName === "VIDEO" ? "video/*" : "");
+              if (node.srcset) String(node.srcset).split(",").forEach(function(part) { report(part.trim().split(/\s+/)[0], "image/*"); });
             } catch (_) {}
           }
 
@@ -746,10 +793,21 @@ private fun browserCaptureScript(): String = """
             new MutationObserver(function(records) {
               records.forEach(function(record) {
                 scanNode(record.target);
-                record.addedNodes && record.addedNodes.forEach(scanNode);
+                record.addedNodes && record.addedNodes.forEach(function(node) {
+                  scanNode(node);
+                  if (node.querySelectorAll) node.querySelectorAll("[src],[href],[srcset],[poster],[data-src],[data-url]").forEach(scanNode);
+                });
               });
             }).observe(document.documentElement || document, {subtree:true, childList:true, attributes:true, attributeFilter:["src","href","poster","srcset","data-src","data-url"]});
           } catch (_) {}
+          function scanDocument() {
+            document.querySelectorAll("[src],[href],[srcset],[poster],[data-src],[data-url]").forEach(scanNode);
+            document.querySelectorAll("script:not([src])").forEach(function(node) { scanText(node.textContent); });
+            try { performance.getEntriesByType("resource").forEach(function(entry) { report(entry.name, ""); }); } catch (_) {}
+          }
+          if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", scanDocument, {once:true});
+          else scanDocument();
+          document.addEventListener("loadedmetadata", function(event) { scanNode(event.target); }, true);
         })();
     """.trimIndent()
 
@@ -810,14 +868,19 @@ private fun BrowserPane(
 
     val navigate = {
         if (localAddress.isNotBlank()) {
+            focusManager.clearFocus(force = true)
+            keyboard?.hide()
+            webView?.clearFocus()
             val url = normalizeUrl(localAddress)
             localAddress = url
             activeUrl = url
             onAddressChange(url)
             pageError = null
             webView?.loadBrowserUrl(url)
-            focusManager.clearFocus()
-            keyboard?.hide()
+            webView?.let { view ->
+                (view.context.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                    .hideSoftInputFromWindow(view.windowToken, 0)
+            }
         }
     }
 
@@ -896,7 +959,6 @@ private fun BrowserPane(
                         setBackgroundColor(android.graphics.Color.WHITE)
                         isFocusable = true
                         isFocusableInTouchMode = true
-                        requestFocus()
 
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
@@ -978,12 +1040,6 @@ private fun BrowserPane(
 
                                 if (scheme == "http" || scheme == "https") {
                                     if (isInstagramHost(currentUrl) && isInstagramStoreUrl(raw)) return true
-                                    if (req.isForMainFrame && view != null &&
-                                        view.settings.userAgentString != browserUserAgent(view.context, raw)
-                                    ) {
-                                        view.loadBrowserUrl(raw)
-                                        return true
-                                    }
                                     return false
                                 }
 
@@ -1028,6 +1084,12 @@ private fun BrowserPane(
                             ) {
                                 loading = true
                                 pageError = null
+                                focusManager.clearFocus(force = true)
+                                keyboard?.hide()
+                                view?.let {
+                                    (it.context.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                                        .hideSoftInputFromWindow(it.windowToken, 0)
+                                }
                                 super.onPageStarted(view, url, favicon)
                             }
 
@@ -1104,6 +1166,7 @@ private fun BrowserPane(
                     webView = view
                     onWebViewReady(view)
                     view.visibility = if (visible) View.VISIBLE else View.INVISIBLE
+                    if (!visible) view.clearFocus()
                 },
                 onRelease = { view ->
                     view.stopLoading()
@@ -1197,6 +1260,8 @@ private fun ExternalAppPane(
     captureActive: Boolean,
     captureStatus: CaptureSnapshot,
     blockQuic: Boolean,
+    inspectHttps: Boolean,
+    onInspectHttpsChange: (Boolean) -> Unit,
     onBlockQuicChange: (Boolean) -> Unit,
     overlayRunning: Boolean,
     onOverlayChange: (Boolean) -> Unit,
@@ -1258,6 +1323,16 @@ private fun ExternalAppPane(
 
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
+                Text("嘗試 HTTPS 解密")
+                Text("預設只轉送加密流量。安裝 CA 後可啟用；若其他 App 功能異常，停止嗅探並關閉此選項後重啟。",
+                    style = MaterialTheme.typography.bodySmall)
+            }
+            Switch(checked = inspectHttps, onCheckedChange = onInspectHttpsChange,
+                enabled = !captureActive && !captureStatus.starting && (caInstalled || caManuallyConfirmed))
+        }
+
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
                 Text("嘗試 TCP 嗅探（停用 HTTP/3）")
                 Text("可以在嗅探中切換，部分 App 會改用 HTTPS；若無法載入請關閉。仍無法解密憑證釘選。",
                     style = MaterialTheme.typography.bodySmall)
@@ -1274,11 +1349,11 @@ private fun ExternalAppPane(
                 onClick = onStart,
                 enabled = !captureActive && !captureStatus.starting,
             ) {
-                Text(if (captureStatus.starting) "啟動中…" else if (caInstalled || caManuallyConfirmed) "開始全域 HTTPS 嗅探" else "開始全域嗅探")
+                Text(if (captureStatus.starting) "啟動中…" else if (inspectHttps) "開始全域 HTTPS 嗅探" else "開始全域嗅探")
             }
             OutlinedButton(
                 onClick = onStop,
-                enabled = captureActive,
+                enabled = captureActive || captureStatus.starting,
             ) {
                 Text("停止嗅探")
             }
@@ -2137,10 +2212,7 @@ private fun browserUserAgent(context: Context, url: String): String {
     val mobile = WebSettings.getDefaultUserAgent(context)
         .replace("; wv", "")
         .replace("Version/4.0 ", "")
-    return if (isInstagramHost(url)) {
-        mobile.replace(Regex("\\([^)]*\\)"), "(X11; Linux x86_64)")
-            .replace(" Mobile", "")
-    } else mobile
+    return mobile
 }
 
 private fun WebView.loadBrowserUrl(url: String) {
@@ -2261,5 +2333,3 @@ private fun formatBytes(value: Long): String = when {
     value >= 1024L -> "%.1f KB".format(value / 1024.0)
     else -> "$value B"
 }
-
-

@@ -79,12 +79,12 @@ class NetstackForwarder(
 
     fun stop() {
         if (!stopped.compareAndSet(false, true)) return
-        runCatching { tunnel?.stop() }
-        tunnel = null
         openSockets.toList().forEach { runCatching { it.close() } }
         openSockets.clear()
         quicSockets.clear()
         executor.shutdownNow()
+        runCatching { tunnel?.stop() }
+        tunnel = null
     }
 
     private fun relayTcp(dstIp: String, dstPort: Int, conn: TCPConn) {
@@ -109,6 +109,7 @@ class NetstackForwarder(
             val upstreamIn = socket.getInputStream()
             val upstreamOut = socket.getOutputStream()
             val closed = AtomicBoolean(false)
+            val inspectionFailed = AtomicBoolean(false)
 
             val upload = Thread {
                 val buffer = ByteArray(32 * 1024)
@@ -117,7 +118,12 @@ class NetstackForwarder(
                         val n = try { conn.read(buffer).toInt() } catch (_: Exception) { -1 }
                         if (n <= 0) break
                         CaptureStatus.transferred(n)
-                        inspector.onClientBytes(buffer, n)
+                        if (!inspectionFailed.get()) {
+                            runCatching { inspector.onClientBytes(buffer, n) }.onFailure {
+                                inspectionFailed.set(true)
+                                CaptureStatus.failure()
+                            }
+                        }
                         upstreamOut.write(buffer, 0, n)
                         upstreamOut.flush()
                     }
@@ -134,7 +140,12 @@ class NetstackForwarder(
                         val n = upstreamIn.read(buffer)
                         if (n <= 0) break
                         CaptureStatus.transferred(n)
-                        inspector.onServerBytes(buffer, n)
+                        if (!inspectionFailed.get()) {
+                            runCatching { inspector.onServerBytes(buffer, n) }.onFailure {
+                                inspectionFailed.set(true)
+                                CaptureStatus.failure()
+                            }
+                        }
                         conn.write(if (n == buffer.size) buffer else buffer.copyOfRange(0, n))
                     }
                 } catch (_: Exception) {
@@ -308,4 +319,3 @@ class NetstackForwarder(
         }
     }
 }
-

@@ -40,22 +40,25 @@ class OverlayService : Service() {
     private lateinit var windowManager: WindowManager
     private var bubble: TextView? = null
     private var panel: View? = null
+    private var lastSessionId = 0L
     private val handler = Handler(Looper.getMainLooper())
+
+    private fun resourceSessionId(): Long {
+        val external = SessionStore.externalIdOrDefault()
+        if (external != 0L) lastSessionId = external
+        if (lastSessionId == 0L) return SessionStore.browserIdOrDefault()
+        return lastSessionId
+    }
 
     private val updateCount = object : Runnable {
         override fun run() {
-            val sessionId = SessionStore.externalIdOrDefault()
+            val sessionId = resourceSessionId()
             val items = if (sessionId == 0L) {
                 emptyList()
             } else {
                 SnifferRepository.preferredResources.value.filter { it.sessionId == sessionId }
             }
-            val status = CaptureStatus.state.value
-            bubble?.text = when {
-                status.starting -> "…"
-                !status.running -> "停止"
-                else -> items.size.toString()
-            }
+            bubble?.text = items.size.toString()
             panel?.findViewWithTag<TextView>("summary")?.text = buildSummary(items)
             handler.postDelayed(this, 250)
         }
@@ -103,7 +106,7 @@ class OverlayService : Service() {
         val density = resources.displayMetrics.density
         val size = (58 * density).toInt()
         val view = TextView(this).apply {
-            text = SessionStore.externalIdOrDefault().let { sessionId ->
+            text = resourceSessionId().let { sessionId ->
                 if (sessionId == 0L) 0
                 else SnifferRepository.preferredResources.value.count { it.sessionId == sessionId }
             }.toString()
@@ -189,7 +192,7 @@ class OverlayService : Service() {
         }
         val summary = TextView(this).apply {
             tag = "summary"
-            val sessionId = SessionStore.externalIdOrDefault()
+            val sessionId = resourceSessionId()
             text = buildSummary(
                 if (sessionId == 0L) emptyList()
                 else SnifferRepository.preferredResources.value.filter { it.sessionId == sessionId }
@@ -215,14 +218,14 @@ class OverlayService : Service() {
             text = "清空目前資源"
             setTextColor(0xFFE0E4E1.toInt())
             backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF354C43.toInt())
-            setOnClickListener { SnifferRepository.clearSession(SessionStore.externalIdOrDefault()) }
+            setOnClickListener { SnifferRepository.clearSession(resourceSessionId()) }
         }
-        val stop = Button(this).apply {
-            text = "關閉懸浮球"
+        val close = Button(this).apply {
+            text = "收起面板"
             setTextColor(0xFFFFDAD6.toInt())
             backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF8C1D18.toInt())
             setOnClickListener {
-                stopSelf()
+                hidePanel()
             }
         }
 
@@ -230,7 +233,7 @@ class OverlayService : Service() {
         layout.addView(summary)
         layout.addView(open)
         layout.addView(clear)
-        layout.addView(stop)
+        layout.addView(close)
 
         val params = WindowManager.LayoutParams(
             minOf((320*density).toInt(), resources.displayMetrics.widthPixels - (32*density).toInt()),
@@ -295,4 +298,3 @@ class OverlayService : Service() {
         }
     }
 }
-

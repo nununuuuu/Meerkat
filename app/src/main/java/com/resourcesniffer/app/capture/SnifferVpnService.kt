@@ -110,11 +110,13 @@ class SnifferVpnService : VpnService() {
     private fun stopCapture(error: String? = null) {
         val engine = forwarder
         forwarder = null
+        // Release the system VPN route before waiting for native relay shutdown.
+        // Otherwise a stalled relay can leave apps routed into a dead tunnel.
+        runCatching { tun?.close() }
+        tun = null
         runCatching { engine?.stop() }
         runCatching { localProxy?.stop() }
         localProxy = null
-        runCatching { tun?.close() }
-        tun = null
         SessionStore.stopExternal()
         CaptureStatus.stopped(error)
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -158,4 +160,3 @@ class SnifferVpnService : VpnService() {
         }
     }
 }
-

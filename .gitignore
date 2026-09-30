@@ -3,5 +3,6 @@
 local.properties
 /build/
 /app/build/
+/app/libs/netstack.aar
 *.iml
 .DS_Store

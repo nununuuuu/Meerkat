@@ -3,7 +3,7 @@
 Android resource discovery and download app built with Kotlin, Jetpack Compose,
 WebView, VpnService, and a gVisor netstack bridge. Requires Android 10 or newer.
 
-## Development version: 0.6.0-beta6
+## Development version: 0.6.0-beta7
 
 - Browser address/search bar, navigation and home controls, and expandable resource sheet
   with Images, Videos, Documents, and Other.
@@ -15,6 +15,9 @@ WebView, VpnService, and a gVisor netstack bridge. Requires Android 10 or newer.
 ## Global capture
 
 Start capture before opening the target app. Grant VPN and overlay permissions.
+HTTPS decryption is an explicit switch on the App screen and is off by default;
+installing the CA alone does not enable it. Leave HTTP/3 forwarding enabled for
+normal app compatibility. Stop capture before changing HTTPS decryption mode.
 For HTTPS inspection, export and install the Meerkat Local CA via Android settings.
 If automatic CA detection fails, confirm installation of the current exported CA
 on the App screen and restart capture. Confirmation is tied to that CA fingerprint.
@@ -36,6 +39,9 @@ and produces a debug APK with JDK 17, Go 1.25, NDK 27.2, and Gradle 9.6.
 Local builds need the Android SDK and `app/libs/netstack.aar`.
 Run `gradle :app:testDebugUnitTest :app:assembleDebug`.
 Tests cover fragmented TLS reads, SNI, truncated records, and HTTP/1.1 without ALPN.
+Run `node --test scripts/test-browser-capture.cjs` for the WebView capture-script
+regression tests (fetch response MIME, JSON/XHR, escaped/relative media URLs,
+dynamic player nodes, srcset, and deduplication).
 The independent floating-ball switch is on the App screen. Resource category
 labels and counts use separate centered rows.
 VPN forwarding, target-app TLS behavior, overlays, and browser layout still need

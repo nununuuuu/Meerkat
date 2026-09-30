@@ -218,13 +218,19 @@ class LocalMitmProxy(
         inspector: HttpResourceStreamInspector?,
     ) {
         val closed = AtomicBoolean(false)
+        val inspectionFailed = AtomicBoolean(false)
         val up = Thread {
             val buffer = ByteArray(32 * 1024)
             try {
                 while (!stopped.get() && !closed.get()) {
                     val n = clientIn.read(buffer)
                     if (n <= 0) break
-                    inspector?.onClientBytes(buffer, n)
+                    if (!inspectionFailed.get()) {
+                        runCatching { inspector?.onClientBytes(buffer, n) }.onFailure {
+                            inspectionFailed.set(true)
+                            CaptureStatus.failure()
+                        }
+                    }
                     upstreamOut.write(buffer, 0, n)
                     upstreamOut.flush()
                 }
@@ -240,7 +246,12 @@ class LocalMitmProxy(
                 while (!stopped.get() && !closed.get()) {
                     val n = upstreamIn.read(buffer)
                     if (n <= 0) break
-                    inspector?.onServerBytes(buffer, n)
+                    if (!inspectionFailed.get()) {
+                        runCatching { inspector?.onServerBytes(buffer, n) }.onFailure {
+                            inspectionFailed.set(true)
+                            CaptureStatus.failure()
+                        }
+                    }
                     clientOut.write(buffer, 0, n)
                     clientOut.flush()
                 }
@@ -272,4 +283,3 @@ class LocalMitmProxy(
         host == address.hostAddress || host.contains(":")
     }.getOrDefault(false)
 }
-
