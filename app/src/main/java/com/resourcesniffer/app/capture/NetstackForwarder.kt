@@ -238,7 +238,12 @@ class NetstackForwarder(
             upload.join()
             download.join()
         } catch (error: Exception) {
-            CaptureStatus.failure("HTTPS 代理：${error.javaClass.simpleName}")
+            val cause = if (error is IllegalArgumentException) {
+                error.message?.take(64) ?: error.javaClass.simpleName
+            } else {
+                error.javaClass.simpleName
+            }
+            CaptureStatus.failure("HTTPS 代理：$cause")
             Log.w("MeerkatRelay", "Upstream relay failed", error)
         } finally {
             runCatching { conn.close() }

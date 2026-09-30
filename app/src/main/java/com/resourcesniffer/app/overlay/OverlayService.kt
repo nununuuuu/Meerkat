@@ -228,12 +228,23 @@ class OverlayService : Service() {
                 hidePanel()
             }
         }
+        val dismissOverlay = Button(this).apply {
+            text = "關閉懸浮窗"
+            setTextColor(0xFFE0E4E1.toInt())
+            backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF354C43.toInt())
+            setOnClickListener { stopSelf() }
+        }
+        val bottomActions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(close, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(dismissOverlay, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        }
 
         layout.addView(title)
         layout.addView(summary)
         layout.addView(open)
         layout.addView(clear)
-        layout.addView(close)
+        layout.addView(bottomActions)
 
         val params = WindowManager.LayoutParams(
             minOf((320*density).toInt(), resources.displayMetrics.widthPixels - (32*density).toInt()),
