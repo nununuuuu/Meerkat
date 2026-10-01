@@ -105,7 +105,7 @@ class NetstackForwarder(
             responseCacheDir = File(vpnService.filesDir, "captured-responses"),
         )
         try {
-            if (!vpnService.protect(socket)) return
+            prepareUpstreamSocket(socket, vpnService::protect)
             socket.tcpNoDelay = true
             socket.connect(InetSocketAddress(InetAddress.getByName(dstIp), dstPort), 12_000)
 
@@ -281,6 +281,7 @@ class NetstackForwarder(
         }
         try {
             if (dstPort == 443 && blockQuic) return
+            if (!socket.isBound) socket.bind(InetSocketAddress(0))
             if (!vpnService.protect(socket)) return
             socket.reuseAddress = true
             socket.soTimeout = 60_000

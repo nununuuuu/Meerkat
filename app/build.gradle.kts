@@ -15,8 +15,9 @@ android {
         applicationId = "com.resourcesniffer.app"
         minSdk = 29
         targetSdk = 36
-        versionCode = 15
+        versionCode = 1000 + (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0)
         versionName = "0.6.0-beta7"
+        buildConfigField("int", "BUILD_NUMBER", System.getenv("GITHUB_RUN_NUMBER") ?: "0")
     }
 
     // Public development identity: keep test APK upgrades compatible so local

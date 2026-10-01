@@ -67,6 +67,8 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Settings
+import com.resourcesniffer.app.settings.SettingsPane
 import androidx.compose.material.icons.filled.Stream
 import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material3.*
@@ -93,6 +95,10 @@ import androidx.webkit.WebViewFeature
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.core.StreamType
+import com.resourcesniffer.app.core.MediaPreviewSupport
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.resourcesniffer.app.core.ValidationState
 import com.resourcesniffer.app.download.DownloadHelper
 import com.resourcesniffer.app.download.DownloadRecord
@@ -137,7 +143,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class MainMode { BROWSER, EXTERNAL, RESOURCES, DOWNLOADS }
+private enum class MainMode { BROWSER, EXTERNAL, RESOURCES, DOWNLOADS, SETTINGS }
 
 private enum class UiResourceCategory(val label: String) {
     IMAGE("圖片"),
@@ -300,6 +306,12 @@ private fun MeerkatApp(
                         icon = { Icon(Icons.Default.DownloadForOffline, null) },
                         label = { Text("下載") },
                     )
+                    NavigationBarItem(
+                        selected = mode == MainMode.SETTINGS,
+                        onClick = { mode = MainMode.SETTINGS },
+                        icon = { Icon(Icons.Default.Settings, null) },
+                        label = { Text("設定") },
+                    )
                 }
             },
         ) { padding ->
@@ -381,6 +393,7 @@ private fun MeerkatApp(
                         onClear = viewModel::clear,
                     )
                     MainMode.DOWNLOADS -> DownloadsPane(downloads)
+                    MainMode.SETTINGS -> SettingsPane()
                 }
             }
         }
@@ -1865,6 +1878,7 @@ private fun ResourcePreviewDialog(
 ) {
     val url = resource.url ?: return
     var previewError by remember(resource.id) { mutableStateOf<String?>(null) }
+    val previewScope = rememberCoroutineScope()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1929,7 +1943,7 @@ private fun ResourcePreviewDialog(
                         val mediaUrl = resource.localCachePath
                             ?.takeIf { File(it).isFile }
                             ?.let { Uri.fromFile(File(it)) }
-                            ?: Uri.parse(resource.finalUrl ?: url)
+                            ?: Uri.parse(MediaPreviewSupport.playbackUrl(resource.finalUrl ?: url))
                         val headers = remember(resource.id, mediaUrl, resource.cookie) {
                             buildMap {
                                 resource.userAgent?.takeIf { it.isNotBlank() }?.let { put("User-Agent", it) }
@@ -1954,6 +1968,15 @@ private fun ResourcePreviewDialog(
                                     addListener(object : Player.Listener {
                                         override fun onPlayerError(error: PlaybackException) {
                                             previewError = previewFailureMessage(error)
+                                            if (mediaUrl.scheme in listOf("http", "https") &&
+                                                error.errorCode in listOf(PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+                                                    PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED)) {
+                                                previewScope.launch {
+                                                    previewError = withContext(Dispatchers.IO) {
+                                                        MediaPreviewSupport.diagnose(mediaUrl.toString(), headers)
+                                                    }
+                                                }
+                                            }
                                         }
                                     })
                                     val item = MediaItem.Builder().setUri(mediaUrl)

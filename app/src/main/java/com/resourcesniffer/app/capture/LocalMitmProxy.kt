@@ -66,7 +66,7 @@ class LocalMitmProxy(
             if (port == 443) handleTls(client, host, dstIp, port)
             else handlePlain(client, BufferedInputStream(rawInput), dstIp, port)
         } catch (error: Throwable) {
-            CaptureStatus.failure("本機代理：${error.javaClass.simpleName}")
+            CaptureStatus.failure("本機代理：${if (error is IllegalStateException) error.message else error.javaClass.simpleName}")
             Log.w("MeerkatProxy", "Proxy connection failed", error)
         } finally {
             sockets -= client
@@ -78,7 +78,7 @@ class LocalMitmProxy(
         val upstream = Socket()
         sockets += upstream
         try {
-            if (!vpnService.protect(upstream)) return
+            prepareUpstreamSocket(upstream, vpnService::protect)
             upstream.tcpNoDelay = true
             upstream.connect(InetSocketAddress(dstIp, port), 12_000)
             val inspector = HttpResourceStreamInspector(
@@ -118,10 +118,7 @@ class LocalMitmProxy(
         val upstreamBase = Socket()
         sockets += upstreamBase
         try {
-            if (!vpnService.protect(upstreamBase)) {
-                CaptureStatus.failure("HTTPS 代理：VPN 無法保護上游連線")
-                return
-            }
+            prepareUpstreamSocket(upstreamBase, vpnService::protect)
             upstreamBase.tcpNoDelay = true
             upstreamBase.connect(InetSocketAddress(dstIp, port), 12_000)
             CaptureStatus.proxyUpstreamConnected()
@@ -135,6 +132,8 @@ class LocalMitmProxy(
                 if (!isIpAddress(host)) serverNames = listOf(SNIHostName(host))
             }
 
+            clientTls.soTimeout = 15_000
+            upstreamTls.soTimeout = 15_000
             try {
                 clientTls.startHandshake()
             } catch (error: SSLHandshakeException) {
@@ -144,6 +143,8 @@ class LocalMitmProxy(
             }
             CaptureStatus.proxyClientTlsCompleted()
             upstreamTls.startHandshake()
+            clientTls.soTimeout = 0
+            upstreamTls.soTimeout = 0
             val clientProtocol = clientTls.applicationProtocol.orEmpty()
             val upstreamProtocol = upstreamTls.applicationProtocol.orEmpty()
             val inspector = if (
@@ -177,7 +178,7 @@ class LocalMitmProxy(
         val upstream = Socket()
         sockets += upstream
         try {
-            if (!vpnService.protect(upstream)) return
+            prepareUpstreamSocket(upstream, vpnService::protect)
             upstream.tcpNoDelay = true
             upstream.connect(InetSocketAddress(dstIp, port), 12_000)
             val clientIn = BufferedInputStream(client.getInputStream())
