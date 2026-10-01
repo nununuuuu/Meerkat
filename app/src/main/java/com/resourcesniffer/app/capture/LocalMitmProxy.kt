@@ -140,7 +140,7 @@ class LocalMitmProxy(
             } catch (error: SSLHandshakeException) {
                 CaptureStatus.opaqueTls()
                 bypassHosts += host.lowercase()
-                throw ClientHandshakeFailure(describeClientHandshake(error.message.orEmpty()), error)
+                throw ClientHandshakeFailure("${host.take(100)}：${describeClientHandshake(error.message.orEmpty())}", error)
             }
             CaptureStatus.proxyClientTlsCompleted()
             upstreamTls.startHandshake()

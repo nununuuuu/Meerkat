@@ -95,6 +95,7 @@ import androidx.media3.ui.PlayerView
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.resourcesniffer.app.core.Resource
+import com.resourcesniffer.app.core.isMetaResourceHost
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.core.StreamType
 import com.resourcesniffer.app.core.MediaPreviewSupport
@@ -394,6 +395,8 @@ private fun MeerkatApp(
                     MainMode.RESOURCES -> ResourcePane(
                         resources = resources,
                         currentSessionId = currentSession?.id,
+                        browserSessionId = browserSession?.id,
+                        externalSessionId = externalSession?.id,
                         onClear = viewModel::clear,
                     )
                     MainMode.DOWNLOADS -> DownloadsPane(downloads)
@@ -1445,6 +1448,8 @@ private fun ExternalAppPane(
 private fun ResourcePane(
     resources: List<Resource>,
     currentSessionId: Long?,
+    browserSessionId: Long?,
+    externalSessionId: Long?,
     onClear: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -1454,14 +1459,18 @@ private fun ResourcePane(
     var selectionMode by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
 
-    val visible = remember(resources, selectedCategory, query, currentOnly, currentSessionId) {
+    var selectedSessionId by remember(currentSessionId) { mutableStateOf(currentSessionId) }
+    var metaOnly by remember { mutableStateOf(false) }
+    val matching = remember(resources, query, currentOnly, selectedSessionId, metaOnly) {
         resources.filter { resource ->
-            (!currentOnly || (currentSessionId != null && resource.sessionId == currentSessionId)) &&
-                (selectedCategory == null || resource.uiCategory() == selectedCategory) &&
-                (query.isBlank() ||
-                    resource.url.orEmpty().contains(query, true) ||
-                    resource.host.contains(query, true))
-        }.sortedWith(
+            (!currentOnly || (selectedSessionId != null && resource.sessionId == selectedSessionId)) &&
+                (!metaOnly || isMetaResourceHost(resource.host)) &&
+                (query.isBlank() || resource.url.orEmpty().contains(query, true) || resource.host.contains(query, true))
+        }
+    }
+    val categoryCounts = remember(matching) { matching.groupingBy { it.uiCategory() }.eachCount() }
+    val visible = remember(matching, selectedCategory) {
+        matching.filter { selectedCategory == null || it.uiCategory() == selectedCategory }.sortedWith(
             compareBy<Resource> {
                 when (it.type) {
                     ResourceType.VIDEO, ResourceType.STREAM -> 0
@@ -1514,6 +1523,27 @@ private fun ResourcePane(
             }
         }
 
+        if (currentOnly && browserSessionId != null && externalSessionId != null) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = selectedSessionId == externalSessionId,
+                    onClick = { selectedSessionId = externalSessionId }, label = { Text("全域 App") })
+                FilterChip(selected = selectedSessionId == browserSessionId,
+                    onClick = { selectedSessionId = browserSessionId }, label = { Text("內建瀏覽器") })
+            }
+        }
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = !metaOnly, onClick = { metaOnly = false }, label = { Text("全部網域") })
+            FilterChip(selected = metaOnly, onClick = { metaOnly = true }, label = { Text("Instagram／Meta 網域") })
+        }
+        Text(
+            if (metaOnly) "僅篩選 Instagram／Meta 網域，可能包含其他貼文或推薦內容。"
+            else if (currentOnly && selectedSessionId == externalSessionId && externalSessionId != null)
+                "全域嗅探包含其他 App 的背景流量，不等於目前貼文的資源。"
+            else "分類數量依目前工作階段、搜尋與網域篩選計算。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },
@@ -1538,12 +1568,12 @@ private fun ResourcePane(
                 FilterChip(
                     selected = selectedCategory == category,
                     onClick = { selectedCategory = category },
-                    label = { Text(label) },
+                    label = { Text("$label ${if (category == null) matching.size else categoryCounts[category] ?: 0}") },
                 )
             }
         }
 
-        Text("已保存 ${visible.size} 項可下載資源", fontWeight = FontWeight.SemiBold)
+        Text("目前顯示 ${visible.size} 項資源", fontWeight = FontWeight.SemiBold)
 
         if (selectionMode) {
             Row(
@@ -1671,7 +1701,7 @@ private fun ResourceRow(
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
-                        resource.sourceAppName ?: resource.host,
+                        resource.sourceAppName?.let { "$it · ${resource.host}" } ?: resource.host,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
