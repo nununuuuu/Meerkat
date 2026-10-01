@@ -99,6 +99,7 @@ class LocalMitmProxy(
     }
 
     private fun handleTls(client: Socket, host: String, dstIp: String, port: Int) {
+        CaptureStatus.proxyAccepted()
         if (host.lowercase() in bypassHosts) {
             CaptureStatus.opaqueTls()
             relayRawTls(client, dstIp, port)
@@ -117,9 +118,13 @@ class LocalMitmProxy(
         val upstreamBase = Socket()
         sockets += upstreamBase
         try {
-            if (!vpnService.protect(upstreamBase)) return
+            if (!vpnService.protect(upstreamBase)) {
+                CaptureStatus.failure("HTTPS 代理：VPN 無法保護上游連線")
+                return
+            }
             upstreamBase.tcpNoDelay = true
             upstreamBase.connect(InetSocketAddress(dstIp, port), 12_000)
+            CaptureStatus.proxyUpstreamConnected()
             val upstreamTls = SSLContext.getDefault().socketFactory.createSocket(
                 upstreamBase, host, port, false,
             ) as SSLSocket
@@ -137,6 +142,7 @@ class LocalMitmProxy(
                 bypassHosts += host.lowercase()
                 throw error
             }
+            CaptureStatus.proxyClientTlsCompleted()
             upstreamTls.startHandshake()
             val clientProtocol = clientTls.applicationProtocol.orEmpty()
             val upstreamProtocol = upstreamTls.applicationProtocol.orEmpty()

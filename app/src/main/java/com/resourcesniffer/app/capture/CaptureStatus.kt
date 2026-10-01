@@ -14,6 +14,9 @@ data class CaptureSnapshot(
     val quicConnections: Long = 0,
     val tlsClientHellos: Long = 0,
     val nonTls443Connections: Long = 0,
+    val proxyAccepted: Long = 0,
+    val proxyUpstreamConnected: Long = 0,
+    val proxyClientTlsCompleted: Long = 0,
     val opaqueTlsConnections: Long = 0,
     val decryptedConnections: Long = 0,
     val failures: Long = 0,
@@ -27,7 +30,9 @@ data class CaptureSnapshot(
         connections == 0L -> "VPN 已啟動，等待其他 App 的新連線"
         else -> "已收到 $connections 條連線 · ${bytes / 1024} KB\n" +
             "TCP/443 $tcp443Connections · UDP/443 $quicConnections（${if (blockQuic) "已停用" else "轉送中"}）\n" +
-            "TLS 握手辨識 $tlsClientHellos · 非 TLS/443 $nonTls443Connections · HTTPS 已解析 $decryptedConnections · ${if (httpsEnabled) "無法解密" else "HTTPS 未檢查"} $opaqueTlsConnections\n轉送失敗 $failures" +
+            "TLS 握手辨識 $tlsClientHellos · 非 TLS/443 $nonTls443Connections · HTTPS 已解析 $decryptedConnections · ${if (httpsEnabled) "無法解密" else "HTTPS 未檢查"} $opaqueTlsConnections\n" +
+            (if (httpsEnabled) "代理接入 $proxyAccepted · 上游連接 $proxyUpstreamConnected · 裝置 TLS 完成 $proxyClientTlsCompleted\n" else "") +
+            "轉送失敗 $failures" +
             (lastFailure?.let { " · 最近：$it" } ?: "") +
             if (!httpsEnabled) "\n本次未啟用 HTTPS 解密：加密流量只會轉送，無法取得資源網址" else ""
     }
@@ -58,6 +63,15 @@ object CaptureStatus {
     }
     @Synchronized fun nonTls443() {
         mutable.value = mutable.value.copy(nonTls443Connections = mutable.value.nonTls443Connections + 1)
+    }
+    @Synchronized fun proxyAccepted() {
+        mutable.value = mutable.value.copy(proxyAccepted = mutable.value.proxyAccepted + 1)
+    }
+    @Synchronized fun proxyUpstreamConnected() {
+        mutable.value = mutable.value.copy(proxyUpstreamConnected = mutable.value.proxyUpstreamConnected + 1)
+    }
+    @Synchronized fun proxyClientTlsCompleted() {
+        mutable.value = mutable.value.copy(proxyClientTlsCompleted = mutable.value.proxyClientTlsCompleted + 1)
     }
     @Synchronized fun transferred(count: Int) {
         if (count > 0) mutable.value = mutable.value.copy(bytes = mutable.value.bytes + count)

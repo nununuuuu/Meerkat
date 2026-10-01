@@ -47,4 +47,16 @@ class CaptureStatusTest {
         assertEquals(1L, state.tlsClientHellos)
         assertTrue(state.summary().contains("TCP/443 1 · UDP/443 1"))
     }
+
+    @Test fun proxyStagesShowWhereTlsStopped() {
+        CaptureStatus.starting()
+        CaptureStatus.started(true)
+        CaptureStatus.proxyAccepted()
+        CaptureStatus.proxyUpstreamConnected()
+        val state = CaptureStatus.state.value
+        assertEquals(1L, state.proxyAccepted)
+        assertEquals(1L, state.proxyUpstreamConnected)
+        assertEquals(0L, state.proxyClientTlsCompleted)
+        assertTrue(state.summary().contains("代理接入 1 · 上游連接 1 · 裝置 TLS 完成 0"))
+    }
 }

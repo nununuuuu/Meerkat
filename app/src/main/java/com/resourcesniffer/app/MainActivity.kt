@@ -171,8 +171,14 @@ private fun MeerkatApp(
     var mode by remember { mutableStateOf(if (incomingUrl != null) MainMode.BROWSER else MainMode.RESOURCES) }
     var address by remember { mutableStateOf(incomingUrl.orEmpty()) }
     var webView by remember { mutableStateOf<WebView?>(null) }
-    var blockQuic by remember { mutableStateOf(false) }
-    var inspectHttps by remember { mutableStateOf(false) }
+    var blockQuic by remember { mutableStateOf(captureStatus.blockQuic) }
+    var inspectHttps by remember { mutableStateOf(captureStatus.httpsEnabled) }
+    LaunchedEffect(captureStatus.running, captureStatus.httpsEnabled, captureStatus.blockQuic) {
+        if (captureStatus.running) {
+            blockQuic = captureStatus.blockQuic
+            inspectHttps = captureStatus.httpsEnabled
+        }
+    }
     val overlayRunning by OverlayService.running.collectAsStateWithLifecycle()
     var overlayWanted by remember { mutableStateOf(false) }
     var manualCaConfirmed by remember { mutableStateOf(viewModel.isMitmCaManuallyConfirmed()) }
