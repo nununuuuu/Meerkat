@@ -13,7 +13,7 @@ import java.net.URL
 import java.security.MessageDigest
 import org.json.JSONArray
 
-internal data class AppRelease(val name: String, val build: Int, val url: String, val digest: String)
+internal data class AppRelease(val name: String, val build: Int, val url: String, val digest: String, val size: Long = 0)
 
 internal object AppUpdates {
     private fun connection(url: String): HttpURLConnection = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -38,13 +38,13 @@ internal object AppUpdates {
                     ?: return@mapNotNull null
                 val digest = apk.optString("digest").removePrefix("sha256:")
                 if (!digest.matches(Regex("[a-fA-F0-9]{64}"))) return@mapNotNull null
-                AppRelease(release.optString("name"), build, apk.getString("browser_download_url"), digest)
+                AppRelease(release.optString("name"), build, apk.getString("browser_download_url"), digest, apk.optLong("size"))
             }.maxByOrNull { it.build } ?: error("尚未找到可更新的版本")
         } finally { conn.disconnect() }
     }
 
     @Suppress("DEPRECATION")
-    fun download(context: Context, release: AppRelease): File {
+    fun download(context: Context, release: AppRelease, onProgress: (Long, Long) -> Unit = { _, _ -> }): File {
         require(release.url.startsWith("https://github.com/nununuuuu/Meerkat/releases/download/"))
         val dir = File(context.cacheDir, "updates").apply { mkdirs() }
         val part = File(dir, "update.pending.apk")
@@ -52,21 +52,10 @@ internal object AppUpdates {
         val conn = connection(release.url)
         try {
             check(conn.responseCode == 200) { "下載失敗：HTTP ${conn.responseCode}" }
-            val digest = MessageDigest.getInstance("SHA-256")
-            conn.inputStream.use { input -> part.outputStream().use { output ->
-                val buffer = ByteArray(64 * 1024)
-                var total = 0L
-                while (true) {
-                    if (Thread.currentThread().isInterrupted) error("下載已取消")
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    total += count
-                    check(total <= 256L * 1024 * 1024) { "更新檔案過大" }
-                    digest.update(buffer, 0, count)
-                    output.write(buffer, 0, count)
-                }
+            val length = conn.contentLengthLong.takeIf { it > 0 } ?: release.size
+            val hash = conn.inputStream.use { input -> part.outputStream().use { output ->
+                copyUpdatePayload(input, output, length, onProgress)
             } }
-            val hash = digest.digest().joinToString("") { "%02x".format(it) }
             check(hash.equals(release.digest, true)) { "更新檔案驗證失敗，請重新下載" }
             val pm = context.packageManager
             val candidate = pm.getPackageArchiveInfo(part.path, PackageManager.GET_SIGNING_CERTIFICATES)

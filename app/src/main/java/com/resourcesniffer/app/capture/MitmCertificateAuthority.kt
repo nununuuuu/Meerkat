@@ -176,7 +176,7 @@ class MitmCertificateAuthority(private val context: Context) {
     ): Pair<PrivateKey, X509Certificate> {
         val keyPair = generateRsaKeyPair()
         val now = System.currentTimeMillis()
-        val issuer = X500Name(caCert.subjectX500Principal.name)
+        val issuer = certificateIssuer(caCert.subjectX500Principal)
         val subject = X500Name("CN=" + host)
         val builder = JcaX509v3CertificateBuilder(
             issuer,

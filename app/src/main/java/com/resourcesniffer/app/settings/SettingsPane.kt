@@ -8,59 +8,76 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.resourcesniffer.app.BuildConfig
-import java.io.File
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import java.util.Locale
+
+@Composable
+internal fun UpdateProgress(state: UpdateState) {
+    if (state.downloading) {
+        if (state.total > 0) {
+            val fraction = (state.received.toFloat() / state.total).coerceIn(0f, 1f)
+            LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+            Text("${(fraction * 100).toInt()}% · " + String.format(Locale.getDefault(), "%.1f / %.1f MB", state.received / 1048576.0, state.total / 1048576.0))
+        } else {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+            Text(String.format(Locale.getDefault(), "已下載 %.1f MB", state.received / 1048576.0))
+        }
+    } else if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+    if (state.message.isNotBlank()) Text(state.message)
+}
+
+@Composable
+fun UpdatePrompt() {
+    val state by UpdateController.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    if (state.showPrompt) AlertDialog(
+        onDismissRequest = UpdateController::dismissPrompt,
+        title = { Text("Meerkat 更新") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            state.release?.let { Text(it.name) }
+            UpdateProgress(state)
+            Text("下載在 App 內完成，安裝前會顯示 Android 系統確認。")
+        } },
+        confirmButton = {
+            if (state.apk != null && !state.busy) TextButton(onClick = { UpdateController.install(context) }) { Text("安裝更新") }
+            else TextButton(onClick = UpdateController::dismissPrompt) { Text("稍後查看") }
+        },
+        dismissButton = {
+            if (state.downloading) TextButton(onClick = UpdateController::cancel) { Text("取消下載") }
+            else TextButton(onClick = UpdateController::dismissPrompt) { Text("關閉") }
+        },
+    )
+}
 
 @Composable
 fun SettingsPane() {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var busy by remember { mutableStateOf(false) }
-    var message by remember { mutableStateOf("") }
-    var release by remember { mutableStateOf<AppRelease?>(null) }
-    var apk by remember { mutableStateOf<File?>(null) }
+    val state by UpdateController.state.collectAsStateWithLifecycle()
     var accounts by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { UpdateController.initialize(context) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("設定", style = MaterialTheme.typography.headlineSmall)
         ElevatedCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("關於", style = MaterialTheme.typography.titleLarge)
-                Text("Meerkat")
-                Text("版本 ${BuildConfig.VERSION_NAME} · build ${BuildConfig.BUILD_NUMBER}")
-                Text("檢查 GitHub 發布的測試版本，下載後由 Android 確認安裝。")
-                Button(enabled = !busy, onClick = {
-                    scope.launch {
-                        busy = true
-                        message = "正在檢查更新…"
-                        apk = null
-                        try {
-                            val latest = withContext(Dispatchers.IO) { AppUpdates.latest() }
-                            release = latest.takeIf { it.build > BuildConfig.BUILD_NUMBER }
-                            message = if (release == null) "目前已是最新版本" else "可更新至 ${latest.name}"
-                        } catch (e: Exception) { message = e.message ?: "檢查更新失敗" }
-                        finally { busy = false }
+                Text("Meerkat · ${BuildConfig.VERSION_NAME} · build ${BuildConfig.BUILD_NUMBER}")
+                Row(Modifier.fillMaxWidth()) {
+                    Column(Modifier.weight(1f)) {
+                        Text("自動更新", style = MaterialTheme.typography.titleMedium)
+                        Text("開啟或返回 App 時自動檢查（每 6 小時一次），有新版便在 App 內下載。下載完成後確認安裝。", style = MaterialTheme.typography.bodySmall)
                     }
-                }) { Text("檢查更新") }
-                release?.let { latest ->
-                    Button(enabled = !busy, onClick = {
-                        scope.launch {
-                            busy = true
-                            try {
-                                if (apk == null) {
-                                    message = "正在下載並驗證更新…"
-                                    apk = withContext(Dispatchers.IO) { AppUpdates.download(context.applicationContext, latest) }
-                                }
-                                message = if (AppUpdates.install(context, apk!!)) "已開啟安裝畫面" else "請允許安裝此來源的 App，返回後再按「安裝更新」"
-                            } catch (e: Exception) { message = e.message ?: "更新失敗" }
-                            finally { busy = false }
-                        }
-                    }) { Text(if (apk == null) "下載更新" else "安裝更新") }
+                    Switch(checked = state.automatic, onCheckedChange = { UpdateController.setAutomatic(context, it) })
                 }
-                if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-                if (message.isNotBlank()) Text(message)
+                Button(enabled = !state.busy, onClick = { UpdateController.check(context, state.automatic) }) { Text("立即檢查更新") }
+                UpdateProgress(state)
+                if (state.release != null && !state.busy) {
+                    Button(onClick = { if (state.apk != null) UpdateController.install(context) else UpdateController.download(context) }) {
+                        Text(if (state.apk != null) "安裝更新" else "下載更新")
+                    }
+                }
+                if (state.downloading) TextButton(onClick = UpdateController::cancel) { Text("取消下載") }
+                Text("下載及驗證皆在 App 內完成；Android 最後會要求確認安裝。", style = MaterialTheme.typography.bodySmall)
             }
         }
         ElevatedCard(Modifier.fillMaxWidth()) {

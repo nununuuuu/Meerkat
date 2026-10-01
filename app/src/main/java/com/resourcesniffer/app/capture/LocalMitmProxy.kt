@@ -66,7 +66,8 @@ class LocalMitmProxy(
             if (port == 443) handleTls(client, host, dstIp, port)
             else handlePlain(client, BufferedInputStream(rawInput), dstIp, port)
         } catch (error: Throwable) {
-            CaptureStatus.failure("本機代理：${if (error is IllegalStateException) error.message else error.javaClass.simpleName}")
+            CaptureStatus.failure(if (error is ClientHandshakeFailure) error.message else
+                "本機代理：${if (error is IllegalStateException) error.message else error.javaClass.simpleName}")
             Log.w("MeerkatProxy", "Proxy connection failed", error)
         } finally {
             sockets -= client
@@ -139,7 +140,7 @@ class LocalMitmProxy(
             } catch (error: SSLHandshakeException) {
                 CaptureStatus.opaqueTls()
                 bypassHosts += host.lowercase()
-                throw error
+                throw ClientHandshakeFailure(describeClientHandshake(error.message.orEmpty()), error)
             }
             CaptureStatus.proxyClientTlsCompleted()
             upstreamTls.startHandshake()
@@ -292,4 +293,17 @@ class LocalMitmProxy(
         val address = InetAddress.getByName(host)
         host == address.hostAddress || host.contains(":")
     }.getOrDefault(false)
+}
+
+private class ClientHandshakeFailure(message: String, cause: Throwable) : java.io.IOException(message, cause)
+
+internal fun describeClientHandshake(message: String): String {
+    val lower = message.lowercase()
+    return when {
+        "unknown ca" in lower || "certificate unknown" in lower || "bad certificate" in lower || "certificate_unknown" in lower ->
+            "裝置 TLS：App 拒絕代理憑證（憑證鏈、信任設定或憑證釘選）"
+        "protocol version" in lower || "no shared cipher" in lower || "no application protocol" in lower ->
+            "裝置 TLS：協定、加密套件或 ALPN 不相容"
+        else -> "裝置 TLS：握手失敗（SSLHandshakeException），尚未讀取 HTTPS 請求"
+    }
 }

@@ -69,6 +69,8 @@ import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Settings
 import com.resourcesniffer.app.settings.SettingsPane
+import com.resourcesniffer.app.settings.UpdateController
+import com.resourcesniffer.app.settings.UpdatePrompt
 import androidx.compose.material.icons.filled.Stream
 import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material3.*
@@ -195,6 +197,7 @@ private fun MeerkatApp(
     androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
         mitmCaInstalled = viewModel.isMitmCaInstalled()
         manualCaConfirmed = viewModel.isMitmCaManuallyConfirmed()
+        UpdateController.onForeground(context)
     }
 
     val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -246,6 +249,7 @@ private fun MeerkatApp(
     }
 
     MeerkatTheme {
+        UpdatePrompt()
         if (showCaConfirmation) {
             AlertDialog(
                 onDismissRequest = { showCaConfirmation = false },
@@ -1304,12 +1308,12 @@ private fun ExternalAppPane(
     ) {
         Text(captureStatus.summary(), style = MaterialTheme.typography.bodyMedium)
         Text("本次找到 $resourceCount 項資源", style = MaterialTheme.typography.bodyMedium)
-        if (captureStatus.running && captureStatus.connections > 0 && resourceCount == 0) {
+        if (captureStatus.running && captureStatus.connections > 0 && (resourceCount == 0 || captureStatus.decryptedConnections == 0L)) {
             val hint = when {
                 !captureStatus.httpsEnabled ->
                     "目前只轉送 HTTPS 加密流量，無法從中讀取媒體網址。請安裝目前的 CA、啟用「嘗試 HTTPS 解密」，再重新開始嗅探。"
                 captureStatus.decryptedConnections == 0L && captureStatus.opaqueTlsConnections > 0L ->
-                    "已有加密連線無法解密。目標 App 可能不信任使用者 CA 或使用憑證釘選；停用 HTTP/3 也無法解除此限制。"
+                    "裝置端 TLS 握手未完成，HTTPS 媒體尚無法讀取。請查看最近的握手原因；部分 App 不接受使用者 CA 或有憑證釘選，即使已抓到少量其他資源，也不代表 HTTPS 已成功解密。"
                 captureStatus.decryptedConnections == 0L && captureStatus.failures > 0L ->
                     "尚無 HTTPS 連線成功解析，且已有 ${captureStatus.failures} 次轉送失敗。請查看上方的最近失敗類型；這不一定是憑證問題。"
                 captureStatus.decryptedConnections == 0L && captureStatus.tcp443Connections == 0L && captureStatus.quicConnections > 0L ->
