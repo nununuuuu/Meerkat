@@ -404,7 +404,10 @@ private fun MeerkatApp(
                     )
                     MainMode.DOWNLOADS -> DownloadsPane(downloads)
                     MainMode.SETTINGS -> SettingsPane(onOpenWebsite = { url ->
-                        context.startActivity(Intent(context, MainActivity::class.java).apply {
+                        address = url
+                        mode = MainMode.BROWSER
+                        webView?.loadBrowserUrl(url)
+                        if (webView == null) context.startActivity(Intent(context, MainActivity::class.java).apply {
                             action = Intent.ACTION_VIEW
                             data = android.net.Uri.parse(url)
                             addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)

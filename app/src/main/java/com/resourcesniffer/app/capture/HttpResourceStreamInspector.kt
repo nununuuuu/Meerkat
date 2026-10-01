@@ -449,6 +449,7 @@ class HttpResourceStreamInspector(
     }
 
     private fun finishResponse() {
+        if (!canCapture()) { responseContext?.cache?.abort(); responseContext = null; return }
         val context = responseContext ?: return
         responseContext = null
         var resource = context.resource
@@ -754,6 +755,7 @@ class HttpResourceStreamInspector(
         contentLength: Long?,
         fileName: String?,
     ): Resource? {
+        if (!canCapture()) return null
         val classificationUrl = if (!fileName.isNullOrBlank()) {
             val separator = if (request.url.contains('?')) '&' else '?'
             request.url + separator + "filename=" + Uri.encode(fileName)

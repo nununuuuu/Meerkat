@@ -53,7 +53,7 @@ internal object ForegroundCapture {
                 events.getNextEvent(event)
                 when (event.eventType) {
                     UsageEvents.Event.ACTIVITY_RESUMED -> change(event.packageName)
-                    UsageEvents.Event.ACTIVITY_PAUSED, UsageEvents.Event.ACTIVITY_STOPPED ->
+                    UsageEvents.Event.ACTIVITY_PAUSED ->
                         if (current == event.packageName) change(null)
                     UsageEvents.Event.SCREEN_NON_INTERACTIVE -> change(null)
                 }
