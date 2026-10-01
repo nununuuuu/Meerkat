@@ -33,6 +33,7 @@ internal object UpdateController {
     fun initialize(context: Context) {
         if (initialized) return
         initialized = true
+        lastCheck = prefs(context).getLong("last-check", 0L)
         mutable.update { it.copy(automatic = prefs(context).getBoolean("automatic", true)) }
     }
 
@@ -52,6 +53,7 @@ internal object UpdateController {
         if (mutable.value.busy) return
         val app = context.applicationContext
         lastCheck = System.currentTimeMillis()
+        prefs(app).edit().putLong("last-check", lastCheck).apply()
         mutable.update { it.copy(busy = true, message = "正在檢查更新…") }
         job = scope.launch {
             try {
@@ -61,7 +63,7 @@ internal object UpdateController {
                 } else {
                     mutable.update { it.copy(release = latest, apk = if (it.release?.build == latest.build) it.apk else null,
                         message = "可更新至 ${latest.name}") }
-                    if (autoDownload && mutable.value.apk == null) downloadNow(app, latest)
+                    if (autoDownload && mutable.value.automatic && mutable.value.apk == null) downloadNow(app, latest)
                 }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { mutable.update { it.copy(message = e.message ?: "檢查更新失敗") } }
