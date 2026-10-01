@@ -26,6 +26,7 @@ data class CaptureSnapshot(
     val decryptedConnections: Long = 0,
     val failures: Long = 0,
     val lastFailure: String? = null,
+    val tlsFailureDetails: String? = null,
     val error: String? = null,
 ) {
     fun summary(): String = when {
@@ -93,6 +94,7 @@ object CaptureStatus {
     @Synchronized fun opaqueTls() {
         mutable.value = mutable.value.copy(opaqueTlsConnections = mutable.value.opaqueTlsConnections + 1)
     }
+    @Synchronized fun tlsDetails(detail: String) { mutable.value = mutable.value.copy(tlsFailureDetails = detail) }
     @Synchronized fun failure(reason: String? = null) {
         mutable.value = mutable.value.copy(
             failures = mutable.value.failures + 1,

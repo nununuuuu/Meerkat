@@ -67,6 +67,8 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.MoreVert
+import com.resourcesniffer.app.ui.PageTitle
 import androidx.compose.material.icons.filled.Settings
 import com.resourcesniffer.app.capture.ForegroundCapture
 import com.resourcesniffer.app.settings.BrowserAccounts
@@ -311,7 +313,7 @@ private fun MeerkatApp(
             Box(
                 Modifier
                     .padding(padding)
-                    .padding(horizontal = if (mode == MainMode.BROWSER) 0.dp else 14.dp, vertical = if (mode == MainMode.BROWSER) 0.dp else 8.dp)
+                    .padding(horizontal = if (mode == MainMode.BROWSER) 0.dp else 20.dp, vertical = if (mode == MainMode.BROWSER) 0.dp else 16.dp)
                     .fillMaxSize(),
             ) {
                 // Keep the browser in composition: tab changes must not recreate its
@@ -384,9 +386,6 @@ private fun MeerkatApp(
                     )
                     MainMode.RESOURCES -> ResourcePane(
                         resources = resources,
-                        currentSessionId = currentSession?.id,
-                        browserSessionId = browserSession?.id,
-                        externalSessionId = externalSession?.id,
                         onClear = viewModel::clear,
                     )
                     MainMode.DOWNLOADS -> DownloadsPane(downloads)
@@ -1307,143 +1306,90 @@ private fun ExternalAppPane(
     caFingerprint: String,
     onInstallCa: () -> Unit,
 ) {
+    var showCertificate by remember { mutableStateOf(false) }
+    var showDiagnostics by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val caReady = caInstalled || caManuallyConfirmed
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        Text(captureStatus.summary(), style = MaterialTheme.typography.bodyMedium)
-        Text("目前前景：${captureStatus.foregroundApp}")
-        Text("只收錄前景 App；首次開始需授予使用情況存取權。切換 App 後請重新載入內容，既有加密連線不能回溯解析。", style = MaterialTheme.typography.bodySmall)
-        Text("本次找到 $resourceCount 項資源", style = MaterialTheme.typography.bodyMedium)
-        if (captureStatus.running && captureStatus.connections > 0 && (resourceCount == 0 || captureStatus.decryptedConnections == 0L)) {
-            val hint = when {
-                !captureStatus.httpsEnabled ->
-                    "目前只轉送 HTTPS 加密流量，無法從中讀取媒體網址。請安裝目前的 CA、啟用「嘗試 HTTPS 解密」，再重新開始嗅探。"
-                captureStatus.decryptedConnections == 0L && captureStatus.opaqueTlsConnections > 0L ->
-                    "裝置端 TLS 握手未完成，HTTPS 媒體尚無法讀取。請查看最近的握手原因；部分 App 不接受使用者 CA 或有憑證釘選，即使已抓到少量其他資源，也不代表 HTTPS 已成功解密。"
-                captureStatus.decryptedConnections == 0L && captureStatus.failures > 0L ->
-                    "尚無 HTTPS 連線成功解析，且已有 ${captureStatus.failures} 次轉送失敗。請查看上方的最近失敗類型；這不一定是憑證問題。"
-                captureStatus.decryptedConnections == 0L && captureStatus.tcp443Connections == 0L && captureStatus.quicConnections > 0L ->
-                    "本次未收到 TCP/443 連線；UDP/443 可能是 HTTP/3，目前只能轉送。若停用後頁面無法載入，請在 Meerkat 內建瀏覽器開啟同一個貼文網址。"
-                captureStatus.decryptedConnections == 0L && captureStatus.quicConnections > 0L ->
-                    "已收到 UDP/443，但尚未解析出 HTTPS。若停用 UDP/443 後頁面無法載入，請在 Meerkat 內建瀏覽器開啟同一個貼文網址。"
-                captureStatus.decryptedConnections > 0L ->
-                    "已解析 HTTPS，但目前沒有辨識到可下載的媒體網址。請在目標 App 播放影片或載入圖片後再查看。"
-                else -> "已收到連線，但尚未收到可解析的 HTTP 資源。請讓目標 App 重新載入內容。"
+        PageTitle("App 嗅探")
+        ElevatedCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(if (captureStatus.starting) "正在啟動" else if (captureActive) "嗅探中" else "已停止",
+                    style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+                if (captureActive) Text("目前前景：${captureStatus.foregroundApp}", style = MaterialTheme.typography.bodyMedium)
+                Text("已找到 $resourceCount 項資源", style = MaterialTheme.typography.titleMedium)
+                val hint = when {
+                    captureStatus.error != null -> captureStatus.error
+                    captureActive && !captureStatus.httpsEnabled -> "HTTPS 目前只轉送。啟用下方解密選項後重新開始，才能嘗試讀取媒體網址。"
+                    captureActive && captureStatus.opaqueTlsConnections > 0 && captureStatus.decryptedConnections == 0L ->
+                        "尚未完成 HTTPS 解密。若 App 拒絕代理憑證，可把分享的貼文網址放到內建瀏覽器開啟。"
+                    captureActive && resourceCount == 0 -> "在前景 App 重新載入或播放內容，以建立新的媒體連線。"
+                    else -> null
+                }
+                hint?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                TextButton(onClick = { showDiagnostics = !showDiagnostics }) { Text(if (showDiagnostics) "收起連線診斷" else "連線診斷") }
+                if (showDiagnostics) {
+                    HorizontalDivider()
+                    Text(captureStatus.summary(), style = MaterialTheme.typography.bodySmall)
+                    captureStatus.tlsFailureDetails?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    TextButton(onClick = {
+                        val report = "目前前景：${captureStatus.foregroundApp}\n" + captureStatus.summary() +
+                            (captureStatus.tlsFailureDetails?.let { "\n$it" } ?: "")
+                        context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("嗅探診斷", report))
+                        Toast.makeText(context, "已複製診斷", Toast.LENGTH_SHORT).show()
+                    }) { Text("複製診斷") }
+                }
             }
-            Text(hint, style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = MaterialTheme.shapes.large,
-            color = MaterialTheme.colorScheme.surfaceVariant,
-        ) {
-            Column(
-                Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text("全域 App 嗅探", fontWeight = FontWeight.SemiBold)
-                Text(
-                    "按下開始後，Meerkat 會自動跟隨目前前景 App，只嗅探該 App 的新連線；背景 App 只轉送、不收錄。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Text(
-                    if (caInstalled) {
-                        "已核對目前的 Meerkat Local CA，可嘗試 HTTPS 嗅探。"
-                    } else if (caManuallyConfirmed) {
-                        "你已手動確認安裝 CA；系統尚未能自動核對，將嘗試 HTTPS 嗅探。"
-                    } else {
-                        "尚未偵測到目前的 Meerkat Local CA。如果你已安裝，可以手動確認；若曾移除並重裝 App，請重新匯出及安裝目前的憑證。"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                if (!caInstalled) {
-                    OutlinedButton(onClick = onInstallCa) {
-                        Text("匯出 CA 並開啟設定")
-                    }
+        ElevatedCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text("嗅探設定", style = MaterialTheme.typography.titleMedium)
+                Text("只收錄目前前景 App 的新連線。首次使用需授予使用情況存取權。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (!caReady) {
+                    Text("安裝 CA 後可嘗試 HTTPS 解密", style = MaterialTheme.typography.titleSmall)
+                    Button(onClick = onInstallCa, modifier = Modifier.fillMaxWidth()) { Text("安裝 CA 憑證") }
                     TextButton(onClick = onConfirmCa) { Text("我已安裝目前的 CA") }
+                } else {
+                    Text(if (caInstalled) "CA 憑證已核對" else "CA 已手動確認，尚未由系統核對",
+                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
                 }
-                Text(
-                    "CA SHA-256：" + caFingerprint,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    "使用 certificate pinning 或拒絕使用者 CA 的 App 仍可能無法解密；Meerkat 會盡量保持其網路連線正常。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("嘗試 HTTPS 解密")
-                Text("預設只轉送加密流量。安裝 CA 後可啟用；若其他 App 功能異常，停止嗅探並關閉此選項後重啟。",
-                    style = MaterialTheme.typography.bodySmall)
-            }
-            Switch(checked = inspectHttps, onCheckedChange = onInspectHttpsChange,
-                enabled = !captureActive && !captureStatus.starting && (caInstalled || caManuallyConfirmed))
-        }
-
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("嘗試 TCP 嗅探（停用 HTTP/3）")
-                Text("可以在嗅探中切換，部分 App 會改用 HTTPS；若無法載入請關閉。仍無法解密憑證釘選。",
-                    style = MaterialTheme.typography.bodySmall)
-            }
-            Switch(checked = blockQuic, onCheckedChange = onBlockQuicChange,
-                enabled = !captureStatus.starting)
-        }
-
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Button(
-                onClick = onStart,
-                enabled = !captureActive && !captureStatus.starting,
-            ) {
-                Text(if (captureStatus.starting) "啟動中…" else if (inspectHttps) "開始全域 HTTPS 嗅探" else "開始全域嗅探")
-            }
-            OutlinedButton(
-                onClick = onStop,
-                enabled = captureActive || captureStatus.starting,
-            ) {
-                Text("停止嗅探")
-            }
-            if (captureActive) {
-                AssistChip(
-                    onClick = {},
-                    label = { Text("背景嗅探中") },
-                )
-            }
-        }
-
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("懸浮球")
-                Text("在其他 App 上顯示嗅探狀態與資源數量。關閉懸浮球不會停止嗅探。",
-                    style = MaterialTheme.typography.bodySmall)
-            }
-            Switch(checked = overlayRunning, onCheckedChange = onOverlayChange)
-        }
-
-        if (captureActive) {
-            ElevatedCard(Modifier.fillMaxWidth()) {
-                Column(
-                    Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text("現在可以直接離開 Meerkat", fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "自行開啟你要使用的 App。嗅探到的資源會加入目前工作階段，懸浮按鈕會顯示目前捕獲數量。",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
+                TextButton(onClick = { showCertificate = !showCertificate }) { Text(if (showCertificate) "收起憑證資訊" else "憑證資訊") }
+                if (showCertificate) {
+                    Text("CA SHA-256：$caFingerprint", style = MaterialTheme.typography.bodySmall)
+                    Text("App 內覆蓋更新通常沿用此憑證。已安裝 CA 仍不代表所有 App 都會信任它。",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (caReady) TextButton(onClick = onInstallCa) { Text("匯出目前 CA") }
                 }
+                HorizontalDivider()
+                CaptureOption("HTTPS 解密", "部分 App 不信任使用者 CA，可能無法解析。變更後需重新開始嗅探。",
+                    inspectHttps, onInspectHttpsChange, !captureActive && !captureStatus.starting && caReady)
+                CaptureOption("停用 HTTP/3", "嘗試讓前景 App 改用 TCP；若內容無法載入，請關閉。",
+                    blockQuic, onBlockQuicChange, !captureStatus.starting)
+                HorizontalDivider()
+                if (captureActive || captureStatus.starting) {
+                    OutlinedButton(onClick = onStop, modifier = Modifier.fillMaxWidth()) { Text("停止嗅探") }
+                } else {
+                    Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) { Text("開始嗅探") }
+                }
+                HorizontalDivider()
+                CaptureOption("懸浮球", "在其他 App 上查看狀態與資源數量。", overlayRunning, onOverlayChange)
             }
         }
+    }
+}
+
+@Composable
+private fun CaptureOption(title: String, description: String, checked: Boolean, onChange: (Boolean) -> Unit, enabled: Boolean = true) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
     }
 }
 
@@ -1451,23 +1397,17 @@ private fun ExternalAppPane(
 @Composable
 private fun ResourcePane(
     resources: List<Resource>,
-    currentSessionId: Long?,
-    browserSessionId: Long?,
-    externalSessionId: Long?,
     onClear: () -> Unit,
 ) {
     val context = LocalContext.current
     var selectedCategory by remember { mutableStateOf<UiResourceCategory?>(null) }
     var query by remember { mutableStateOf("") }
-    var currentOnly by remember(currentSessionId) { mutableStateOf(currentSessionId != null) }
     var selectionMode by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
 
-    var selectedSessionId by remember(currentSessionId) { mutableStateOf(currentSessionId) }
-    val matching = remember(resources, query, currentOnly, selectedSessionId) {
+    val matching = remember(resources, query) {
         resources.filter { resource ->
-            (!currentOnly || (selectedSessionId != null && resource.sessionId == selectedSessionId)) &&
-                (query.isBlank() || resource.url.orEmpty().contains(query, true) || resource.host.contains(query, true))
+            (query.isBlank() || resource.url.orEmpty().contains(query, true) || resource.host.contains(query, true))
         }
     }
     val categoryCounts = remember(matching) { matching.groupingBy { it.uiCategory() }.eachCount() }
@@ -1493,44 +1433,28 @@ private fun ResourcePane(
     }
 
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            FilterChip(
-                selected = currentOnly,
-                onClick = { currentOnly = !currentOnly },
-                label = { Text(if (currentOnly) "本次嗅探" else "全部歷史") },
-            )
-            OutlinedButton(onClick = onClear) {
-                Icon(Icons.Default.Delete, null)
-                Spacer(Modifier.width(4.dp))
-                Text("清空歷史")
-            }
-            OutlinedButton(onClick = {
-                selectionMode = !selectionMode
-                if (!selectionMode) selectedIds = emptySet()
-            }) {
-                Text(if (selectionMode) "取消選取" else "批次選取")
-            }
-            if (selectionMode) {
-                OutlinedButton(onClick = {
-                    selectedIds = if (selectedIds.size == visible.size) emptySet()
-                    else visible.mapTo(linkedSetOf()) { it.id }
-                }) {
-                    Text(if (selectedIds.size == visible.size && visible.isNotEmpty()) "取消全選" else "全選目前")
+        var showActions by remember { mutableStateOf(false) }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            PageTitle("資源", Modifier.weight(1f))
+            Box {
+                IconButton(onClick = { showActions = true }) { Icon(Icons.Default.MoreVert, contentDescription = "資源操作") }
+                DropdownMenu(expanded = showActions, onDismissRequest = { showActions = false }) {
+                    DropdownMenuItem(text = { Text(if (selectionMode) "取消選取" else "批次選取") }, onClick = {
+                        showActions = false
+                        selectionMode = !selectionMode
+                        if (!selectionMode) selectedIds = emptySet()
+                    })
+                    DropdownMenuItem(text = { Text("清空歷史") }, onClick = { showActions = false; onClear() })
                 }
             }
         }
-
-        if (currentOnly && browserSessionId != null && externalSessionId != null) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = selectedSessionId == externalSessionId,
-                    onClick = { selectedSessionId = externalSessionId }, label = { Text("全域 App") })
-                FilterChip(selected = selectedSessionId == browserSessionId,
-                    onClick = { selectedSessionId = browserSessionId }, label = { Text("內建瀏覽器") })
+        if (selectionMode) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("已選 ${selectedIds.size} 項", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                TextButton(onClick = { selectedIds = if (selectedIds.size == visible.size) emptySet() else visible.mapTo(linkedSetOf()) { it.id } }) {
+                    Text(if (selectedIds.size == visible.size && visible.isNotEmpty()) "取消全選" else "全選")
+                }
+                TextButton(onClick = { selectionMode = false; selectedIds = emptySet() }) { Text("完成") }
             }
         }
         OutlinedTextField(
@@ -2073,9 +1997,9 @@ private fun previewFailureMessage(error: PlaybackException): String = when (erro
 private fun DownloadsPane(downloads: List<DownloadRecord>) {
     val context = LocalContext.current
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("下載管理", fontWeight = FontWeight.SemiBold)
-            OutlinedButton(onClick = { DownloadRegistry.clearCompleted() }) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            PageTitle("下載管理", Modifier.weight(1f))
+            TextButton(onClick = { DownloadRegistry.clearCompleted() }) {
                 Text("清除已結束")
             }
         }

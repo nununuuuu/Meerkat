@@ -9,6 +9,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.resourcesniffer.app.ui.PageTitle
 import com.resourcesniffer.app.BuildConfig
 import java.util.Locale
 
@@ -56,7 +57,7 @@ fun SettingsPane(onOpenWebsite: (String) -> Unit) {
     val state by UpdateController.state.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { UpdateController.initialize(context) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Text("設定", style = MaterialTheme.typography.headlineSmall)
+        PageTitle("設定")
         ElevatedCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("關於", style = MaterialTheme.typography.titleLarge)
