@@ -51,10 +51,9 @@ fun UpdatePrompt() {
 }
 
 @Composable
-fun SettingsPane() {
+fun SettingsPane(onOpenWebsite: (String) -> Unit) {
     val context = LocalContext.current
     val state by UpdateController.state.collectAsStateWithLifecycle()
-    var accounts by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { UpdateController.initialize(context) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("設定", style = MaterialTheme.typography.headlineSmall)
@@ -80,15 +79,6 @@ fun SettingsPane() {
                 Text("下載及驗證皆在 App 內完成；Android 最後會要求確認安裝。", style = MaterialTheme.typography.bodySmall)
             }
         }
-        ElevatedCard(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("帳號設定", style = MaterialTheme.typography.titleLarge)
-                Text("預留常用帳號帶入功能。")
-                OutlinedButton(onClick = { accounts = true }) { Text("帳號設定") }
-            }
-        }
+        WebsiteAccounts(onOpenWebsite)
     }
-    if (accounts) AlertDialog(onDismissRequest = { accounts = false }, title = { Text("帳號設定") },
-        text = { Text("常用帳號帶入功能規劃中。目前尚未儲存帳號或密碼。") },
-        confirmButton = { TextButton(onClick = { accounts = false }) { Text("知道了") } })
 }

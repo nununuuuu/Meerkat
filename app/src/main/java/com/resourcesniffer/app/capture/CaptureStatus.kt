@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 data class CaptureSnapshot(
+    val foregroundApp: String = "等待前景 App",
     val running: Boolean = false,
     val starting: Boolean = false,
     val httpsEnabled: Boolean = false,
@@ -43,6 +44,7 @@ object CaptureStatus {
     private val mutable = MutableStateFlow(CaptureSnapshot())
     val state = mutable.asStateFlow()
 
+    @Synchronized fun foreground(name: String) { mutable.value = mutable.value.copy(foregroundApp = name) }
     @Synchronized fun starting() { mutable.value = CaptureSnapshot(starting = true) }
     @Synchronized fun started(https: Boolean) {
         mutable.value = mutable.value.copy(starting = false, running = true, httpsEnabled = https)

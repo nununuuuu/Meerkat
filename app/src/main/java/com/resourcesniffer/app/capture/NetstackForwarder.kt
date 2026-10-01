@@ -34,7 +34,7 @@ class NetstackForwarder(
     private val executor = Executors.newCachedThreadPool()
     private val stopped = AtomicBoolean(false)
     private val openSockets = ConcurrentHashMap.newKeySet<java.io.Closeable>()
-    private val quicSockets = ConcurrentHashMap.newKeySet<java.io.Closeable>()
+    private val quicSockets = ConcurrentHashMap<java.io.Closeable, CaptureLease>()
     @Volatile private var tunnel: Tunnel? = null
 
     fun start(tunFd: Int, mtu: Int = 1500) {
@@ -46,11 +46,12 @@ class NetstackForwarder(
                 dstPort: Long,
                 conn: TCPConn,
             ) {
-                CaptureStatus.connection(
+                val lease = ForegroundCapture.owner(6, srcIp, srcPort.toInt(), dstIp, dstPort.toInt())
+                if (lease != null) CaptureStatus.connection(
                     opaqueTls = dstPort == 443L && localProxyPort == null,
                     tcp443 = dstPort == 443L,
                 )
-                executor.execute { relayTcp(dstIp, dstPort.toInt(), conn) }
+                executor.execute { relayTcp(dstIp, dstPort.toInt(), conn, lease = lease) }
             }
 
             override fun handleUDP(
@@ -60,12 +61,13 @@ class NetstackForwarder(
                 dstPort: Long,
                 conn: UDPConn,
             ) {
-                CaptureStatus.connection(quic = dstPort == 443L)
-                if (blockQuic && dstPort == 443L) {
+                val lease = ForegroundCapture.owner(17, srcIp, srcPort.toInt(), dstIp, dstPort.toInt())
+                if (lease != null) CaptureStatus.connection(quic = dstPort == 443L)
+                if (lease != null && blockQuic && dstPort == 443L) {
                     runCatching { conn.close() }
                     return
                 }
-                executor.execute { relayUdp(dstIp, dstPort.toInt(), conn) }
+                executor.execute { relayUdp(dstIp, dstPort.toInt(), conn, lease) }
             }
 
             override fun log(level: Long, msg: String) {
@@ -77,7 +79,7 @@ class NetstackForwarder(
 
     fun setBlockQuic(enabled: Boolean) {
         blockQuic = enabled
-        if (enabled) quicSockets.toList().forEach { runCatching { it.close() } }
+        if (enabled) quicSockets.entries.toList().filter { it.value.active() }.forEach { runCatching { it.key.close() } }
     }
 
     fun stop() {
@@ -90,9 +92,9 @@ class NetstackForwarder(
         tunnel = null
     }
 
-    private fun relayTcp(dstIp: String, dstPort: Int, conn: TCPConn, initialBytes: ByteArray? = null) {
-        if (initialBytes == null && localProxyPort != null && (dstPort == 80 || dstPort == 443)) {
-            relayTcpViaProxy(dstIp, dstPort, conn, localProxyPort)
+    private fun relayTcp(dstIp: String, dstPort: Int, conn: TCPConn, initialBytes: ByteArray? = null, lease: CaptureLease? = null) {
+        if (lease?.active() == true && initialBytes == null && localProxyPort != null && (dstPort == 80 || dstPort == 443)) {
+            relayTcpViaProxy(dstIp, dstPort, conn, localProxyPort, lease!!)
             return
         }
         val socket = Socket()
@@ -100,8 +102,9 @@ class NetstackForwarder(
         val endpoint = java.io.Closeable { conn.close() }
         openSockets += endpoint
         val inspector = HttpResourceStreamInspector(
-            sourcePackage,
-            sourceName,
+            lease?.packageName,
+            lease?.packageName?.let(ForegroundCapture::name),
+            canCapture = { lease?.active() == true },
             responseCacheDir = File(vpnService.filesDir, "captured-responses"),
         )
         try {
@@ -112,7 +115,7 @@ class NetstackForwarder(
             val upstreamIn = socket.getInputStream()
             val upstreamOut = socket.getOutputStream()
             if (initialBytes != null) {
-                CaptureStatus.transferred(initialBytes.size)
+                if (lease?.active() == true) CaptureStatus.transferred(initialBytes.size)
                 upstreamOut.write(initialBytes)
                 upstreamOut.flush()
             }
@@ -125,7 +128,7 @@ class NetstackForwarder(
                     while (!stopped.get() && !closed.get()) {
                         val n = try { conn.read(buffer).toInt() } catch (_: Exception) { -1 }
                         if (n <= 0) break
-                        CaptureStatus.transferred(n)
+                        if (lease?.active() == true) CaptureStatus.transferred(n)
                         if (!inspectionFailed.get()) {
                             runCatching { inspector.onClientBytes(buffer, n) }.onFailure {
                                 inspectionFailed.set(true)
@@ -147,7 +150,7 @@ class NetstackForwarder(
                     while (!stopped.get() && !closed.get()) {
                         val n = upstreamIn.read(buffer)
                         if (n <= 0) break
-                        CaptureStatus.transferred(n)
+                        if (lease?.active() == true) CaptureStatus.transferred(n)
                         if (!inspectionFailed.get()) {
                             runCatching { inspector.onServerBytes(buffer, n) }.onFailure {
                                 inspectionFailed.set(true)
@@ -179,7 +182,7 @@ class NetstackForwarder(
         }
     }
 
-    private fun relayTcpViaProxy(dstIp: String, dstPort: Int, conn: TCPConn, proxyPort: Int) {
+    private fun relayTcpViaProxy(dstIp: String, dstPort: Int, conn: TCPConn, proxyPort: Int, lease: CaptureLease) {
         val socket = Socket()
         openSockets += socket
         val endpoint = java.io.Closeable { conn.close() }
@@ -190,7 +193,7 @@ class NetstackForwarder(
                     ?: return
                 if (!initial.isClientHello) {
                     CaptureStatus.nonTls443()
-                    relayTcp(dstIp, dstPort, conn, initial.bytes)
+                    relayTcp(dstIp, dstPort, conn, initial.bytes, lease)
                     return
                 }
                 CaptureStatus.tlsClientHello()
@@ -201,7 +204,7 @@ class NetstackForwarder(
                 if (count <= 0) return
                 buffer.copyOf(count)
             }
-            CaptureStatus.transferred(firstBytes.size)
+            if (lease?.active() == true) CaptureStatus.transferred(firstBytes.size)
             val host = if (dstPort == 443) {
                 TlsClientHelloParser.parseSni(firstBytes, 0, firstBytes.size) ?: dstIp
             } else dstIp
@@ -210,7 +213,7 @@ class NetstackForwarder(
             socket.connect(InetSocketAddress(InetAddress.getLoopbackAddress(), proxyPort), 5_000)
             val proxyIn = socket.getInputStream()
             val proxyOut = socket.getOutputStream()
-            val preface = "MEERKAT\t" + host + "\t" + dstIp + "\t" + dstPort + "\n"
+            val preface = "MEERKAT\t" + host + "\t" + dstIp + "\t" + dstPort + "\t" + lease.packageName + "\t" + lease.generation + "\n"
             proxyOut.write(preface.toByteArray(Charsets.US_ASCII))
             proxyOut.write(firstBytes)
             proxyOut.flush()
@@ -222,7 +225,7 @@ class NetstackForwarder(
                     while (!stopped.get() && !closed.get()) {
                         val n = try { conn.read(buffer).toInt() } catch (_: Exception) { -1 }
                         if (n <= 0) break
-                        CaptureStatus.transferred(n)
+                        if (lease?.active() == true) CaptureStatus.transferred(n)
                         proxyOut.write(buffer, 0, n)
                         proxyOut.flush()
                     }
@@ -238,7 +241,7 @@ class NetstackForwarder(
                     while (!stopped.get() && !closed.get()) {
                         val n = proxyIn.read(buffer)
                         if (n <= 0) break
-                        CaptureStatus.transferred(n)
+                        if (lease?.active() == true) CaptureStatus.transferred(n)
                         conn.write(if (n == buffer.size) buffer else buffer.copyOfRange(0, n))
                     }
                 } catch (_: Exception) {
@@ -268,19 +271,19 @@ class NetstackForwarder(
             openSockets -= endpoint
         }
     }
-    private fun relayUdp(dstIp: String, dstPort: Int, conn: UDPConn) {
+    private fun relayUdp(dstIp: String, dstPort: Int, conn: UDPConn, lease: CaptureLease?) {
         // UDP/443 passes through by default. The explicit TCP compatibility
         // option can close these associations and block new ones.
         val socket = DatagramSocket(null)
         openSockets += socket
         val endpoint = java.io.Closeable { conn.close() }
         openSockets += endpoint
-        if (dstPort == 443) {
-            quicSockets += socket
-            quicSockets += endpoint
+        if (dstPort == 443 && lease?.active() == true) {
+            quicSockets[socket] = lease!!
+            quicSockets[endpoint] = lease!!
         }
         try {
-            if (dstPort == 443 && blockQuic) return
+            if (dstPort == 443 && blockQuic && lease?.active() == true) return
             if (!socket.isBound) socket.bind(InetSocketAddress(0))
             if (!vpnService.protect(socket)) return
             socket.reuseAddress = true
@@ -292,7 +295,7 @@ class NetstackForwarder(
                 try {
                     while (!stopped.get() && !closed.get()) {
                         val data = try { conn.receive() } catch (_: Exception) { null } ?: break
-                        CaptureStatus.transferred(data.size)
+                        if (lease?.active() == true) CaptureStatus.transferred(data.size)
                         socket.send(DatagramPacket(data, data.size))
                     }
                 } catch (_: Exception) {
@@ -313,7 +316,7 @@ class NetstackForwarder(
                         } catch (_: SocketTimeoutException) {
                             break
                         }
-                        CaptureStatus.transferred(packet.length)
+                        if (lease?.active() == true) CaptureStatus.transferred(packet.length)
                         conn.send(packet.data.copyOfRange(packet.offset, packet.offset + packet.length))
                     }
                 } catch (_: Exception) {
@@ -336,8 +339,8 @@ class NetstackForwarder(
             runCatching { socket.close() }
             openSockets -= socket
             openSockets -= endpoint
-            quicSockets -= socket
-            quicSockets -= endpoint
+            quicSockets.remove(socket)
+            quicSockets.remove(endpoint)
         }
     }
 }

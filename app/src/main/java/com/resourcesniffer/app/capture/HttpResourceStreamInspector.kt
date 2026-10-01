@@ -32,6 +32,7 @@ class HttpResourceStreamInspector(
     private val sourceName: String? = null,
     private val secure: Boolean = false,
     private val responseCacheDir: File? = null,
+    private val canCapture: () -> Boolean = { true },
 ) {
     private data class PendingRequest(
         val method: String,
@@ -124,6 +125,14 @@ class HttpResourceStreamInspector(
 
     @Synchronized
     fun onClientBytes(bytes: ByteArray, length: Int) {
+        if (!canCapture()) {
+            responseContext?.cache?.abort()
+            responseContext = null
+            requestQueue.clear()
+            responseQueue.clear()
+            pendingRequests.clear()
+            return
+        }
         if (length <= 0) return
         if (webSocketMode) {
             webSocketClientParser.feed(bytes, length)
@@ -135,6 +144,14 @@ class HttpResourceStreamInspector(
 
     @Synchronized
     fun onServerBytes(bytes: ByteArray, length: Int) {
+        if (!canCapture()) {
+            responseContext?.cache?.abort()
+            responseContext = null
+            requestQueue.clear()
+            responseQueue.clear()
+            pendingRequests.clear()
+            return
+        }
         if (length <= 0) return
         if (webSocketMode) {
             webSocketServerParser.feed(bytes, length)

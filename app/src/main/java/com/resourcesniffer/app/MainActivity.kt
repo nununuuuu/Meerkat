@@ -68,6 +68,7 @@ import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Settings
+import com.resourcesniffer.app.capture.ForegroundCapture
 import com.resourcesniffer.app.settings.SettingsPane
 import com.resourcesniffer.app.settings.UpdateController
 import com.resourcesniffer.app.settings.UpdatePrompt
@@ -362,7 +363,9 @@ private fun MeerkatApp(
                                 notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                             }
                             val prepare = VpnService.prepare(context)
-                            if (prepare != null) {
+                            if (!ForegroundCapture.hasPermission(context)) {
+                                context.startActivity(Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                            } else if (prepare != null) {
                                 vpnLauncher.launch(prepare)
                             } else {
                                 beginGlobalCapture()
@@ -400,7 +403,13 @@ private fun MeerkatApp(
                         onClear = viewModel::clear,
                     )
                     MainMode.DOWNLOADS -> DownloadsPane(downloads)
-                    MainMode.SETTINGS -> SettingsPane()
+                    MainMode.SETTINGS -> SettingsPane(onOpenWebsite = { url ->
+                        context.startActivity(Intent(context, MainActivity::class.java).apply {
+                            action = Intent.ACTION_VIEW
+                            data = android.net.Uri.parse(url)
+                            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                        })
+                    })
                 }
             }
         }
@@ -1310,6 +1319,8 @@ private fun ExternalAppPane(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(captureStatus.summary(), style = MaterialTheme.typography.bodyMedium)
+        Text("目前前景：${captureStatus.foregroundApp}")
+        Text("只收錄前景 App；首次開始需授予使用情況存取權。切換 App 後請重新載入內容，既有加密連線不能回溯解析。", style = MaterialTheme.typography.bodySmall)
         Text("本次找到 $resourceCount 項資源", style = MaterialTheme.typography.bodyMedium)
         if (captureStatus.running && captureStatus.connections > 0 && (resourceCount == 0 || captureStatus.decryptedConnections == 0L)) {
             val hint = when {
@@ -1341,7 +1352,7 @@ private fun ExternalAppPane(
             ) {
                 Text("全域 App 嗅探", fontWeight = FontWeight.SemiBold)
                 Text(
-                    "按下開始後，Meerkat 會在背景持續嗅探。你可以直接離開 Meerkat，自行開啟 Instagram、Threads、瀏覽器或其他 App，不需要事先選擇目標 App。",
+                    "按下開始後，Meerkat 會自動跟隨目前前景 App，只嗅探該 App 的新連線；背景 App 只轉送、不收錄。",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Text(
@@ -1538,7 +1549,7 @@ private fun ResourcePane(
         Text(
             if (metaOnly) "僅篩選 Instagram／Meta 網域，可能包含其他貼文或推薦內容。"
             else if (currentOnly && selectedSessionId == externalSessionId && externalSessionId != null)
-                "全域嗅探包含其他 App 的背景流量，不等於目前貼文的資源。"
+                "只收錄當時前景 App 的資源；同一 App 的預載內容仍可能包含其他貼文。"
             else "分類數量依目前工作階段、搜尋與網域篩選計算。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

@@ -28,6 +28,13 @@ class SnifferVpnService : VpnService() {
 
     @Volatile private var forwarder: NetstackForwarder? = null
     @Volatile private var localProxy: LocalMitmProxy? = null
+    private val foregroundHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val foregroundPoll = object : Runnable {
+        override fun run() {
+            ForegroundCapture.refresh()
+            foregroundHandler.postDelayed(this, 500)
+        }
+    }
     private var tun: ParcelFileDescriptor? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -52,6 +59,9 @@ class SnifferVpnService : VpnService() {
 
         CaptureStatus.starting()
         try {
+            check(ForegroundCapture.hasPermission(this)) { "請先授予使用情況存取權，才能只嗅探前景 App" }
+            ForegroundCapture.start(this)
+            foregroundHandler.post(foregroundPoll)
             createNotificationChannel()
             startForeground(NOTIFICATION_ID, buildNotification())
 
@@ -108,6 +118,8 @@ class SnifferVpnService : VpnService() {
 
     @Synchronized
     private fun stopCapture(error: String? = null) {
+        foregroundHandler.removeCallbacks(foregroundPoll)
+        ForegroundCapture.stop()
         val engine = forwarder
         forwarder = null
         // Release the system VPN route before waiting for native relay shutdown.

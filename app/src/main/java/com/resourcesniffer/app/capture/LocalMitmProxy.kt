@@ -59,12 +59,14 @@ class LocalMitmProxy(
             val rawInput = client.getInputStream()
             val preface = readLine(rawInput, 1024) ?: return
             val parts = preface.split('\t')
-            if (parts.size != 4 || parts[0] != "MEERKAT") return
+            if (parts.size != 6 || parts[0] != "MEERKAT") return
             val host = parts[1]
             val dstIp = parts[2]
             val port = parts[3].toIntOrNull() ?: return
-            if (port == 443) handleTls(client, host, dstIp, port)
-            else handlePlain(client, BufferedInputStream(rawInput), dstIp, port)
+            val lease = CaptureLease(parts[4], parts[5].toLongOrNull() ?: return)
+            if (!lease.active()) { relayRawTls(client, dstIp, port); return }
+            if (port == 443) handleTls(client, host, dstIp, port, lease)
+            else handlePlain(client, BufferedInputStream(rawInput), dstIp, port, lease)
         } catch (error: Throwable) {
             CaptureStatus.failure(if (error is ClientHandshakeFailure) error.message else
                 "本機代理：${if (error is IllegalStateException) error.message else error.javaClass.simpleName}")
@@ -75,7 +77,7 @@ class LocalMitmProxy(
         }
     }
 
-    private fun handlePlain(client: Socket, clientInput: BufferedInputStream, dstIp: String, port: Int) {
+    private fun handlePlain(client: Socket, clientInput: BufferedInputStream, dstIp: String, port: Int, lease: CaptureLease) {
         val upstream = Socket()
         sockets += upstream
         try {
@@ -83,8 +85,9 @@ class LocalMitmProxy(
             upstream.tcpNoDelay = true
             upstream.connect(InetSocketAddress(dstIp, port), 12_000)
             val inspector = HttpResourceStreamInspector(
-                sourcePackage,
-                sourceName,
+                lease.packageName,
+                ForegroundCapture.name(lease.packageName),
+                canCapture = lease::active,
                 secure = false,
                 responseCacheDir = File(vpnService.filesDir, "captured-responses"),
             )
@@ -99,9 +102,10 @@ class LocalMitmProxy(
         }
     }
 
-    private fun handleTls(client: Socket, host: String, dstIp: String, port: Int) {
+    private fun handleTls(client: Socket, host: String, dstIp: String, port: Int, lease: CaptureLease) {
         CaptureStatus.proxyAccepted()
-        if (host.lowercase() in bypassHosts) {
+        val bypassKey = lease.packageName + ":" + host.lowercase()
+        if (bypassKey in bypassHosts) {
             CaptureStatus.opaqueTls()
             relayRawTls(client, dstIp, port)
             return
@@ -139,7 +143,7 @@ class LocalMitmProxy(
                 clientTls.startHandshake()
             } catch (error: SSLHandshakeException) {
                 CaptureStatus.opaqueTls()
-                bypassHosts += host.lowercase()
+                bypassHosts += bypassKey
                 throw ClientHandshakeFailure("${host.take(100)}：${describeClientHandshake(error.message.orEmpty())}", error)
             }
             CaptureStatus.proxyClientTlsCompleted()
@@ -153,8 +157,9 @@ class LocalMitmProxy(
                 TlsClientHelloParser.isHttp1(upstreamProtocol)
             ) {
                 HttpResourceStreamInspector(
-                    sourcePackage,
-                    sourceName,
+                    lease.packageName,
+                    ForegroundCapture.name(lease.packageName),
+                    canCapture = lease::active,
                     secure = true,
                     responseCacheDir = File(vpnService.filesDir, "captured-responses"),
                 )
