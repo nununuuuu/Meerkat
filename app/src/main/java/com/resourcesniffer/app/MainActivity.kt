@@ -93,6 +93,7 @@ import androidx.webkit.WebViewFeature
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.core.StreamType
+import com.resourcesniffer.app.core.ValidationState
 import com.resourcesniffer.app.download.DownloadHelper
 import com.resourcesniffer.app.download.DownloadRecord
 import com.resourcesniffer.app.download.DownloadQuality
@@ -1670,6 +1671,14 @@ private fun ResourceRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            if (resource.validationState == ValidationState.FAILED) {
+                Text(
+                    "連結檢查失敗，可能已過期或需要登入；預覽和下載可能無法使用。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
 
             Text(
                 url,

@@ -61,6 +61,8 @@ object ResourceValidator {
             var fileName = parseDispositionFileName(head.getHeaderField("Content-Disposition")) ?: resource.fileName
             val headCode = head.responseCode
             head.disconnect()
+            var getAttempted = false
+            var getSucceeded = false
 
             var width = resource.width
             var height = resource.height
@@ -79,7 +81,9 @@ object ResourceValidator {
                     mime.equals("application/octet-stream", true) ||
                     length == null ||
                     fileName == null ||
-                    classification.type == ResourceType.IMAGE
+                    classification.type == ResourceType.IMAGE ||
+                    classification.type == ResourceType.VIDEO ||
+                    classification.type == ResourceType.AUDIO
 
             var sniffedType: ResourceType? = null
             var sniffedExtension: String? = null
@@ -93,7 +97,9 @@ object ResourceValidator {
                     else -> "bytes=0-0"
                 }
                 val get = open(resource.copy(url = finalUrl), "GET", range)
-                if (get.responseCode in 200..299 || get.responseCode == HttpURLConnection.HTTP_PARTIAL) {
+                getAttempted = true
+                getSucceeded = get.responseCode in 200..299
+                if (getSucceeded) {
                     finalUrl = get.url?.toString() ?: finalUrl
                     mime = get.contentType?.substringBefore(';')?.trim() ?: mime
                     fileName = parseDispositionFileName(get.getHeaderField("Content-Disposition")) ?: fileName
@@ -159,6 +165,11 @@ object ResourceValidator {
                 ?: sniffedExtension
                 ?: resource.extension
 
+            val mediaResource = resource.type in setOf(ResourceType.VIDEO, ResourceType.AUDIO, ResourceType.STREAM)
+            val htmlResponse = ResourceClassifier.normalizeMime(mime) in setOf("text/html", "application/xhtml+xml")
+            val verified = (if (mediaResource && getAttempted) getSucceeded else headCode in 200..299 || getSucceeded) &&
+                !(mediaResource && htmlResponse)
+
             resource.copy(
                 finalUrl = finalUrl,
                 host = parsed?.host ?: resource.host,
@@ -172,7 +183,7 @@ object ResourceValidator {
                 height = height,
                 etag = etag,
                 mediaGroupKey = MediaIdentity.groupKey(finalUrl),
-                validationState = ValidationState.VERIFIED,
+                validationState = if (verified) ValidationState.VERIFIED else ValidationState.FAILED,
                 verifiedAt = System.currentTimeMillis(),
             )
         }.getOrElse {

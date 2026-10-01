@@ -51,6 +51,7 @@ class CaptureStatusTest {
     @Test fun proxyStagesShowWhereTlsStopped() {
         CaptureStatus.starting()
         CaptureStatus.started(true)
+        CaptureStatus.connection(tcp443 = true)
         CaptureStatus.proxyAccepted()
         CaptureStatus.proxyUpstreamConnected()
         val state = CaptureStatus.state.value

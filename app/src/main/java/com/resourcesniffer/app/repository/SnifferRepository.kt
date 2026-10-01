@@ -92,7 +92,7 @@ object SnifferRepository {
                 validationState = when {
                     resource.validationState == ValidationState.VERIFIED -> ValidationState.VERIFIED
                     old.validationState == ValidationState.VERIFIED -> ValidationState.VERIFIED
-                    resource.validationState == ValidationState.FAILED && old.validationState == ValidationState.FAILED -> ValidationState.FAILED
+                    resource.validationState == ValidationState.FAILED || old.validationState == ValidationState.FAILED -> ValidationState.FAILED
                     else -> ValidationState.UNVERIFIED
                 },
                 verifiedAt = maxOfNullable(old.verifiedAt, resource.verifiedAt),
@@ -281,5 +281,4 @@ object SnifferRepository {
         }.getOrDefault(emptyList())
     }
 }
-
 
