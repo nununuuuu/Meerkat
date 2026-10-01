@@ -69,6 +69,7 @@ import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Settings
 import com.resourcesniffer.app.capture.ForegroundCapture
+import com.resourcesniffer.app.settings.BrowserAccounts
 import com.resourcesniffer.app.settings.SettingsPane
 import com.resourcesniffer.app.settings.UpdateController
 import com.resourcesniffer.app.settings.UpdatePrompt
@@ -96,7 +97,6 @@ import androidx.media3.ui.PlayerView
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.resourcesniffer.app.core.Resource
-import com.resourcesniffer.app.core.isMetaResourceHost
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.core.StreamType
 import com.resourcesniffer.app.core.MediaPreviewSupport
@@ -124,6 +124,11 @@ class MainActivity : ComponentActivity() {
         incomingUrl.value = extractUrl(intent)
         if (intent.getBooleanExtra("open_resources", false)) resourceRequest.value = System.nanoTime()
         setContent { MeerkatApp(viewModel, incomingUrl.value, resourceRequest.value) }
+    }
+
+    override fun onPause() {
+        CookieManager.getInstance().flush()
+        super.onPause()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -268,24 +273,6 @@ private fun MeerkatApp(
             )
         }
         Scaffold(
-            topBar = {
-                if (mode != MainMode.BROWSER) CenterAlignedTopAppBar(
-                    title = {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("Meerkat", fontWeight = FontWeight.SemiBold)
-                            Text(
-                                when {
-                                    externalCaptureActive -> "正在全域嗅探"
-                                    currentSession != null -> "已建立嗅探工作階段"
-                                    else -> "資源嗅探與下載"
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                )
-            },
             bottomBar = {
                 NavigationBar {
                     NavigationBarItem(
@@ -955,6 +942,8 @@ private fun BrowserPane(
             }
         }
 
+        BrowserAccounts(webView)
+
         if (loading) {
             LinearProgressIndicator(
                 progress = { progress.coerceIn(0, 100) / 100f },
@@ -1170,6 +1159,7 @@ private fun BrowserPane(
                                 view?.postDelayed({
                                     if (view.isAttachedToWindow) scanDomResources(view, viewModel)
                                 }, 700)
+                                CookieManager.getInstance().flush()
                                 super.onPageFinished(view, url)
                             }
 
@@ -1469,16 +1459,14 @@ private fun ResourcePane(
     val context = LocalContext.current
     var selectedCategory by remember { mutableStateOf<UiResourceCategory?>(null) }
     var query by remember { mutableStateOf("") }
-    var currentOnly by remember { mutableStateOf(true) }
+    var currentOnly by remember(currentSessionId) { mutableStateOf(currentSessionId != null) }
     var selectionMode by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
 
     var selectedSessionId by remember(currentSessionId) { mutableStateOf(currentSessionId) }
-    var metaOnly by remember { mutableStateOf(false) }
-    val matching = remember(resources, query, currentOnly, selectedSessionId, metaOnly) {
+    val matching = remember(resources, query, currentOnly, selectedSessionId) {
         resources.filter { resource ->
             (!currentOnly || (selectedSessionId != null && resource.sessionId == selectedSessionId)) &&
-                (!metaOnly || isMetaResourceHost(resource.host)) &&
                 (query.isBlank() || resource.url.orEmpty().contains(query, true) || resource.host.contains(query, true))
         }
     }
@@ -1545,19 +1533,6 @@ private fun ResourcePane(
                     onClick = { selectedSessionId = browserSessionId }, label = { Text("內建瀏覽器") })
             }
         }
-        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(selected = !metaOnly, onClick = { metaOnly = false }, label = { Text("全部網域") })
-            FilterChip(selected = metaOnly, onClick = { metaOnly = true }, label = { Text("Instagram／Meta 網域") })
-        }
-        Text(
-            if (metaOnly) "僅篩選 Instagram／Meta 網域，可能包含其他貼文或推薦內容。"
-            else if (currentOnly && selectedSessionId == externalSessionId && externalSessionId != null)
-                "只收錄當時前景 App 的資源；同一 App 的預載內容仍可能包含其他貼文。"
-            else "分類數量依目前工作階段、搜尋與網域篩選計算。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },

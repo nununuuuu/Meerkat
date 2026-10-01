@@ -4,6 +4,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 data class CaptureSnapshot(
+    val observedConnections: Long = 0,
+    val backgroundConnections: Long = 0,
+    val unattributedConnections: Long = 0,
+    val attributionError: String? = null,
     val foregroundApp: String = "等待前景 App",
     val running: Boolean = false,
     val starting: Boolean = false,
@@ -28,8 +32,10 @@ data class CaptureSnapshot(
         starting -> "正在啟動 VPN…"
         error != null && !running -> "嗅探啟動失敗：$error"
         !running -> "全域嗅探已停止"
-        connections == 0L -> "VPN 已啟動，等待其他 App 的新連線"
-        else -> "已收到 $connections 條連線 · ${bytes / 1024} KB\n" +
+        connections == 0L -> if (observedConnections == 0L) "VPN 已啟動，尚未收到新連線" else
+            "已接入 $observedConnections 條連線 · 前景符合 0\n背景轉送 $backgroundConnections · 無法辨識歸屬 $unattributedConnections" +
+                (attributionError?.let { "\n$it" } ?: "")
+        else -> "接入 $observedConnections · 背景 $backgroundConnections · 歸屬未知 $unattributedConnections\n已收到 $connections 條連線 · ${bytes / 1024} KB\n" +
             "TCP/443 $tcp443Connections · UDP/443 $quicConnections（${if (blockQuic) "已停用" else "轉送中"}）\n" +
             "TLS 握手辨識 $tlsClientHellos · 非 TLS/443 $nonTls443Connections · HTTPS 已解析 $decryptedConnections · ${if (httpsEnabled) "無法解密" else "HTTPS 未檢查"} $opaqueTlsConnections\n" +
             (if (httpsEnabled) "代理接入 $proxyAccepted · 上游連接 $proxyUpstreamConnected · 裝置 TLS 完成 $proxyClientTlsCompleted\n" else "") +
@@ -44,6 +50,9 @@ object CaptureStatus {
     private val mutable = MutableStateFlow(CaptureSnapshot())
     val state = mutable.asStateFlow()
 
+    @Synchronized fun observed() { mutable.value = mutable.value.copy(observedConnections = mutable.value.observedConnections + 1) }
+    @Synchronized fun background() { mutable.value = mutable.value.copy(backgroundConnections = mutable.value.backgroundConnections + 1) }
+    @Synchronized fun unattributed(reason: String) { mutable.value = mutable.value.copy(unattributedConnections = mutable.value.unattributedConnections + 1, attributionError = reason) }
     @Synchronized fun foreground(name: String) { mutable.value = mutable.value.copy(foregroundApp = name) }
     @Synchronized fun starting() { mutable.value = CaptureSnapshot(starting = true) }
     @Synchronized fun started(https: Boolean) {

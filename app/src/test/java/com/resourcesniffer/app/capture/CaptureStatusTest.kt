@@ -60,4 +60,12 @@ class CaptureStatusTest {
         assertEquals(0L, state.proxyClientTlsCompleted)
         assertTrue(state.summary().contains("代理接入 1 · 上游連接 1 · 裝置 TLS 完成 0"))
     }
+    @Test fun unmatchedTrafficIsNotMisreportedAsWaitingForConnections() {
+        CaptureStatus.observed()
+        CaptureStatus.unattributed("系統未回傳連線所屬 App")
+        val status = CaptureStatus.state.value
+        assertEquals(0L, status.connections)
+        assertTrue(status.summary().contains("無法辨識歸屬 1"))
+        assertFalse(status.summary().contains("等待其他 App"))
+    }
 }

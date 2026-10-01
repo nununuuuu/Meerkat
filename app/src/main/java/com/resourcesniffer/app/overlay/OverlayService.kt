@@ -118,8 +118,8 @@ class OverlayService : Service() {
             setTextColor(0xFFFFFFFF.toInt())
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(0xFF005140.toInt())
-                setStroke((1 * density).toInt().coerceAtLeast(1), 0xFF78E6C0.toInt())
+                setColor(0xFF466C80.toInt())
+                setStroke((1 * density).toInt().coerceAtLeast(1), 0xFF466C80.toInt())
             }
             setPadding(12, 12, 12, 12)
         }
@@ -218,14 +218,14 @@ class OverlayService : Service() {
             setPadding((16*density).toInt(), (14*density).toInt(), (16*density).toInt(), (14*density).toInt())
             background = GradientDrawable().apply {
                 cornerRadius = 22 * density
-                setColor(0xF21A201D.toInt())
+                setColor(0xFAFFFCF8.toInt())
                 setStroke((1 * density).toInt().coerceAtLeast(1), 0xFF3F4945.toInt())
             }
         }
 
         val title = TextView(this).apply {
-            text = "Meerkat 資源面板"
-            setTextColor(0xFF96F4D5.toInt())
+            text = "資源面板"
+            setTextColor(0xFF466C80.toInt())
             textSize = 18f
         }
         val summary = TextView(this).apply {
@@ -235,14 +235,14 @@ class OverlayService : Service() {
                 if (sessionId == 0L) emptyList()
                 else SnifferRepository.preferredResources.value.filter { it.sessionId == sessionId }
             )
-            setTextColor(0xFFBEC9C4.toInt())
+            setTextColor(0xFF686158.toInt())
             textSize = 14f
             setPadding(0, (8*density).toInt(), 0, (10*density).toInt())
         }
         val open = Button(this).apply {
             text = "查看資源"
-            setTextColor(0xFF00382C.toInt())
-            backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF78E6C0.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
+            backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF466C80.toInt())
             setOnClickListener {
                 startActivity(
                     Intent(this@OverlayService, MainActivity::class.java)
@@ -254,22 +254,22 @@ class OverlayService : Service() {
         }
         val clear = Button(this).apply {
             text = "清空目前資源"
-            setTextColor(0xFFE0E4E1.toInt())
-            backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF354C43.toInt())
+            setTextColor(0xFF302E2B.toInt())
+            backgroundTintList = android.content.res.ColorStateList.valueOf(0xFFF0EAE1.toInt())
             setOnClickListener { SnifferRepository.clearSession(resourceSessionId()) }
         }
         val close = Button(this).apply {
             text = "收起面板"
-            setTextColor(0xFFFFDAD6.toInt())
-            backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF8C1D18.toInt())
+            setTextColor(0xFF603B29.toInt())
+            backgroundTintList = android.content.res.ColorStateList.valueOf(0xFFF6DFCD.toInt())
             setOnClickListener {
                 hidePanel()
             }
         }
         val dismissOverlay = Button(this).apply {
             text = "關閉懸浮窗"
-            setTextColor(0xFFE0E4E1.toInt())
-            backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF354C43.toInt())
+            setTextColor(0xFF302E2B.toInt())
+            backgroundTintList = android.content.res.ColorStateList.valueOf(0xFFF0EAE1.toInt())
             setOnClickListener { stopSelf() }
         }
         val bottomActions = LinearLayout(this).apply {
@@ -351,7 +351,7 @@ class OverlayService : Service() {
                 status.decryptedConnections == 0L && status.quicConnections > 0L) {
                 "\n目前尚未解析 HTTPS；UDP/443 流量只能轉送。可將貼文網址貼到 Meerkat 內建瀏覽器重試。"
             } else ""
-            return status.summary() + "\n尚未找到可下載資源" + hint
+            return "目前前景：${status.foregroundApp}\n" + status.summary() + "\n尚未找到可下載資源" + hint
         }
         val imageCount = items.count { it.type == ResourceType.IMAGE }
         val videoCount = items.count {

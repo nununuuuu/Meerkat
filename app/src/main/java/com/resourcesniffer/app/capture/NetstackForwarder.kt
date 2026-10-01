@@ -46,12 +46,14 @@ class NetstackForwarder(
                 dstPort: Long,
                 conn: TCPConn,
             ) {
-                val lease = ForegroundCapture.owner(6, srcIp, srcPort.toInt(), dstIp, dstPort.toInt())
-                if (lease != null) CaptureStatus.connection(
-                    opaqueTls = dstPort == 443L && localProxyPort == null,
-                    tcp443 = dstPort == 443L,
-                )
-                executor.execute { relayTcp(dstIp, dstPort.toInt(), conn, lease = lease) }
+                executor.execute {
+                    val lease = ForegroundCapture.owner(6, srcIp, srcPort.toInt(), dstIp, dstPort.toInt())
+                    if (lease != null) CaptureStatus.connection(
+                        opaqueTls = dstPort == 443L && localProxyPort == null,
+                        tcp443 = dstPort == 443L,
+                    )
+                    relayTcp(dstIp, dstPort.toInt(), conn, lease = lease)
+                }
             }
 
             override fun handleUDP(
@@ -61,13 +63,13 @@ class NetstackForwarder(
                 dstPort: Long,
                 conn: UDPConn,
             ) {
-                val lease = ForegroundCapture.owner(17, srcIp, srcPort.toInt(), dstIp, dstPort.toInt())
-                if (lease != null) CaptureStatus.connection(quic = dstPort == 443L)
-                if (lease != null && blockQuic && dstPort == 443L) {
-                    runCatching { conn.close() }
-                    return
+                executor.execute {
+                    val lease = ForegroundCapture.owner(17, srcIp, srcPort.toInt(), dstIp, dstPort.toInt())
+                    if (lease != null) CaptureStatus.connection(quic = dstPort == 443L)
+                    if (lease != null && blockQuic && dstPort == 443L) {
+                        runCatching { conn.close() }
+                    } else relayUdp(dstIp, dstPort.toInt(), conn, lease)
                 }
-                executor.execute { relayUdp(dstIp, dstPort.toInt(), conn, lease) }
             }
 
             override fun log(level: Long, msg: String) {

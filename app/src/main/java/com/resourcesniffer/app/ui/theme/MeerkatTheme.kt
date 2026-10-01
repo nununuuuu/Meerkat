@@ -1,34 +1,29 @@
 package com.resourcesniffer.app.ui.theme
 
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-private val MeerkatDarkColors = darkColorScheme(
-    primary = Color(0xFF78E6C0),
-    onPrimary = Color(0xFF00382C),
-    primaryContainer = Color(0xFF005140),
-    onPrimaryContainer = Color(0xFF96F4D5),
-    secondary = Color(0xFFB2CCC1),
-    onSecondary = Color(0xFF1E352D),
-    secondaryContainer = Color(0xFF354C43),
-    onSecondaryContainer = Color(0xFFCDE8DC),
-    tertiary = Color(0xFFA8C7FA),
-    onTertiary = Color(0xFF0B305F),
-    background = Color(0xFF101412),
-    onBackground = Color(0xFFE0E4E1),
-    surface = Color(0xFF101412),
-    onSurface = Color(0xFFE0E4E1),
-    surfaceVariant = Color(0xFF3F4945),
-    onSurfaceVariant = Color(0xFFBEC9C4),
-    outline = Color(0xFF89938E),
+private val MeerkatColors = lightColorScheme(
+    primary = Color(0xFF466C80), onPrimary = Color.White,
+    primaryContainer = Color(0xFFDDEAF0), onPrimaryContainer = Color(0xFF27485A),
+    secondary = Color(0xFF9B5738), onSecondary = Color.White,
+    secondaryContainer = Color(0xFFF6DFCD), onSecondaryContainer = Color(0xFF603B29),
+    tertiary = Color(0xFFAD6845), onTertiary = Color.White,
+    tertiaryContainer = Color(0xFFFFE5D1), onTertiaryContainer = Color(0xFF663C26),
+    background = Color(0xFFFAF7F2), onBackground = Color(0xFF302E2B),
+    surface = Color(0xFFFAF7F2), onSurface = Color(0xFF302E2B),
+    surfaceVariant = Color(0xFFF0EAE1), onSurfaceVariant = Color(0xFF686158),
+    surfaceContainerLowest = Color.White, surfaceContainerLow = Color(0xFFFFFCF8),
+    surfaceContainer = Color(0xFFF4EFE8), surfaceContainerHigh = Color(0xFFEFE8DF),
+    surfaceContainerHighest = Color(0xFFE8E0D6),
+    outline = Color(0xFF8A8178), outlineVariant = Color(0xFFDED5CA),
+    error = Color(0xFFAB4038), onError = Color.White,
+    errorContainer = Color(0xFFFFDAD5), onErrorContainer = Color(0xFF702821),
 )
 
 @Composable
 fun MeerkatTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = MeerkatDarkColors,
-        content = content,
-    )
+    MaterialTheme(colorScheme = MeerkatColors, content = content)
 }
