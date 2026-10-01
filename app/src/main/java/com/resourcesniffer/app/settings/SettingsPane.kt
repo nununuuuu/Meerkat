@@ -35,6 +35,7 @@ fun SettingsPane() {
                     scope.launch {
                         busy = true
                         message = "正在檢查更新…"
+                        apk = null
                         try {
                             val latest = withContext(Dispatchers.IO) { AppUpdates.latest() }
                             release = latest.takeIf { it.build > BuildConfig.BUILD_NUMBER }

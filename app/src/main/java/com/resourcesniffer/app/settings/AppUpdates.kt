@@ -47,7 +47,7 @@ internal object AppUpdates {
     fun download(context: Context, release: AppRelease): File {
         require(release.url.startsWith("https://github.com/nununuuuu/Meerkat/releases/download/"))
         val dir = File(context.cacheDir, "updates").apply { mkdirs() }
-        val part = File(dir, "update.part")
+        val part = File(dir, "update.pending.apk")
         val apk = File(dir, "update.apk")
         val conn = connection(release.url)
         try {

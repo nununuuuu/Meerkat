@@ -13,19 +13,12 @@ PY
 )"
 APK_HASH="$(sha256sum "$APK_PATH" | cut -d ' ' -f1)"
 BASE_TAG="v$VERSION"
-TAG="$BASE_TAG"
+TAG="$BASE_TAG-build$GITHUB_RUN_NUMBER"
 
 release_digest() {
     gh api "repos/$GH_REPO/releases/tags/$1" --jq '.assets[] | select(.name | endswith(".apk")) | .digest'
 }
 
-if gh release view "$TAG" >/dev/null 2>&1; then
-    if [[ "$(release_digest "$TAG")" == "sha256:$APK_HASH" ]]; then
-        echo "Identical APK is already published at $TAG"
-        exit 0
-    fi
-    TAG="$BASE_TAG-build$GITHUB_RUN_NUMBER"
-fi
 if gh release view "$TAG" >/dev/null 2>&1; then
     if [[ "$(release_digest "$TAG")" == "sha256:$APK_HASH" ]]; then
         echo "Identical APK is already published at $TAG"
