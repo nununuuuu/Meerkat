@@ -9,7 +9,7 @@ const source = fs.readFileSync(
 const script = source.match(/private fun browserCaptureScript\(\): String = """([\s\S]*?)"""\.trimIndent\(\)/)[1];
 const domScript = source.match(/private fun scanDomResources[\s\S]*?val script = """([\s\S]*?)"""\.trimIndent\(\)/)[1];
 
-function browser({nodes = [], inline = [], fetchResponse, performanceEntries = []} = {}) {
+function browser({nodes = [], inline = [], fetchResponse, performanceEntries = [], pageUrl = "https://page.test/folder/"} = {}) {
   const reports = [];
   let mutation;
   class BrowserURL extends URL {
@@ -40,7 +40,7 @@ function browser({nodes = [], inline = [], fetchResponse, performanceEntries = [
       querySelectorAll(selector) { return selector === 'script:not([src])' ? inline : nodes; },
       addEventListener() {},
     },
-    location: {href: 'https://page.test/folder/'},
+    location: {href: pageUrl},
     navigator: {}, performance: {getEntriesByType: () => performanceEntries},
     MutationObserver: class {
       constructor(callback) { mutation = callback; }
@@ -115,4 +115,13 @@ test('srcset whitespace resolves separate image URLs', () => {
   }]});
   assert.deepEqual(reports.map(r => r.url),
     ['https://page.test/small.jpg', 'https://page.test/large.jpg']);
+});
+
+test('authentication documents keep browser APIs untouched', () => {
+  for (const path of ['/accounts/login/', '/signin', '/oauth2/authorize', '/challenge/123']) {
+    const { context, reports } = browser({pageUrl: 'https://example.com' + path});
+    assert.equal(context.__meerkatCaptureInstalled, undefined, path);
+    assert.equal(vm.runInContext('JSON.parse.toString().includes("[native code]")', context), true, path);
+    assert.equal(reports.length, 0, path);
+  }
 });

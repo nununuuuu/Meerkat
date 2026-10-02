@@ -1,16 +1,13 @@
 package com.resourcesniffer.app.ui
 
 import android.app.Application
-import android.content.Intent
 import android.net.Uri
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import com.resourcesniffer.app.core.MediaIdentity
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceClassifier
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.core.ResourceValidator
-import com.resourcesniffer.app.overlay.OverlayService
 import com.resourcesniffer.app.repository.SnifferRepository
 import com.resourcesniffer.app.repository.SessionStore
 import java.util.concurrent.atomic.AtomicLong
@@ -100,15 +97,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         )
     }
-    fun stopOverlay() {
-        getApplication<Application>().stopService(Intent(getApplication<Application>(), OverlayService::class.java))
-    }
-
-    fun startOverlay() {
-        val context = getApplication<Application>()
-        ContextCompat.startForegroundService(context, Intent(context, OverlayService::class.java))
-    }
-
     fun clear() = SnifferRepository.clear()
 
     fun clearCurrentSession() = SnifferRepository.clearSession(SessionStore.idOrDefault())

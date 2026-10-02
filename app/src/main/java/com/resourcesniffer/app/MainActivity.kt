@@ -1,17 +1,13 @@
 package com.resourcesniffer.app
 
-import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.Message
 import android.view.View
-import android.provider.Settings
 import android.util.Base64
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
@@ -32,9 +28,7 @@ import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardActions
@@ -105,7 +99,6 @@ import com.resourcesniffer.app.download.DownloadRecord
 import com.resourcesniffer.app.download.DownloadQuality
 import com.resourcesniffer.app.download.DownloadRegistry
 import com.resourcesniffer.app.download.DownloadState
-import com.resourcesniffer.app.overlay.OverlayService
 import com.resourcesniffer.app.ui.MainViewModel
 import com.resourcesniffer.app.ui.theme.MeerkatTheme
 import org.json.JSONArray
@@ -179,29 +172,8 @@ private fun MeerkatApp(
     var mode by remember { mutableStateOf(MainMode.BROWSER) }
     var address by remember { mutableStateOf(incomingUrl.orEmpty()) }
     var webView by remember { mutableStateOf<WebView?>(null) }
-    val overlayRunning by OverlayService.running.collectAsStateWithLifecycle()
-    var overlayWanted by remember { mutableStateOf(false) }
     androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
         UpdateController.onForeground(context)
-    }
-    val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
-    val overlayLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        if (overlayWanted && Settings.canDrawOverlays(context)) {
-            viewModel.startOverlay()
-        }
-    }
-
-    val setOverlay: (Boolean) -> Unit = { enabled ->
-        overlayWanted = enabled
-        if (!enabled) {
-            viewModel.stopOverlay()
-        } else if (Settings.canDrawOverlays(context)) {
-            if (Build.VERSION.SDK_INT >= 33) notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            viewModel.startOverlay()
-        } else {
-            overlayLauncher.launch(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:${context.packageName}")))
-        }
     }
 
     LaunchedEffect(incomingUrl) {
@@ -278,16 +250,7 @@ private fun MeerkatApp(
                         onClear = viewModel::clear,
                     )
                     MainMode.DOWNLOADS -> DownloadsPane(downloads)
-                    MainMode.SETTINGS -> SettingsPane(overlayRunning = overlayRunning, onOverlayChange = setOverlay, onOpenWebsite = { url ->
-                        address = url
-                        mode = MainMode.BROWSER
-                        webView?.loadBrowserUrl(url)
-                        if (webView == null) context.startActivity(Intent(context, MainActivity::class.java).apply {
-                            action = Intent.ACTION_VIEW
-                            data = android.net.Uri.parse(url)
-                            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                        })
-                    })
+                    MainMode.SETTINGS -> SettingsPane()
                 }
             }
         }
@@ -453,6 +416,10 @@ private class BrowserCaptureBridge(
 }
 private fun browserCaptureScript(): String = """
         (function() {
+          // Authentication pages need their original browser APIs. Do not inspect
+          // their response bodies or replace fetch/JSON/worker implementations.
+          const authPath = new URL(location.href).pathname;
+          if (/(?:^|\/)(?:login|log-in|signin|sign-in|signup|sign-up|oauth|oauth2|authorize|authorization|checkpoint|challenge)(?:\/|$)/i.test(authPath)) return;
           if (window.__meerkatCaptureInstalled) return;
           window.__meerkatCaptureInstalled = true;
 
@@ -890,7 +857,9 @@ private fun BrowserPane(
                         settings.builtInZoomControls = true
                         settings.displayZoomControls = false
                         settings.javaScriptCanOpenWindowsAutomatically = true
-                        settings.setSupportMultipleWindows(true)
+                        // Keep target=_blank and window.open navigation in this configured
+                        // WebView, including cookies, JavaScript and form submissions.
+                        settings.setSupportMultipleWindows(false)
                         settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
 
                         addJavascriptInterface(
@@ -911,34 +880,6 @@ private fun BrowserPane(
                         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
                         webChromeClient = object : WebChromeClient() {
-                            override fun onCreateWindow(
-                                view: WebView?,
-                                isDialog: Boolean,
-                                isUserGesture: Boolean,
-                                resultMsg: Message?,
-                            ): Boolean {
-                                // target="_blank" and window.open must use the same captured
-                                // browser, rather than an external app or an uncaptured window.
-                                val message = resultMsg ?: return false
-                                val transport = message.obj as? WebView.WebViewTransport ?: return false
-                                val popup = WebView(ctx)
-                                popup.webViewClient = object : WebViewClient() {
-                                    override fun shouldOverrideUrlLoading(
-                                        view: WebView?,
-                                        request: WebResourceRequest?,
-                                    ): Boolean {
-                                        val target = request?.url?.toString() ?: return true
-                                        if (target == "about:blank") return false
-                                        resolveBrowsableUrl(target)?.let { loadBrowserUrl(it) }
-                                        popup.post { popup.destroy() }
-                                        return true
-                                    }
-                                }
-                                transport.webView = popup
-                                message.sendToTarget()
-                                return true
-                            }
-
                             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                                 progress = newProgress
                                 loading = newProgress in 0..99
@@ -1025,6 +966,18 @@ private fun BrowserPane(
                                     loading = false
                                 }
                                 super.onReceivedError(view, request, error)
+                            }
+
+                            override fun onReceivedHttpError(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                                errorResponse: android.webkit.WebResourceResponse?,
+                            ) {
+                                if (request?.isForMainFrame == true) {
+                                    pageError = "網站回應 HTTP ${errorResponse?.statusCode}，請重新整理或稍後再試。"
+                                    loading = false
+                                }
+                                super.onReceivedHttpError(view, request, errorResponse)
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
