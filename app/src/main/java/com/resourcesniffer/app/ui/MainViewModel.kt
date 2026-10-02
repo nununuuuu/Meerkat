@@ -3,6 +3,7 @@ package com.resourcesniffer.app.ui
 import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
+import com.resourcesniffer.app.core.CaptureReportGate
 import com.resourcesniffer.app.core.MediaIdentity
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceClassifier
@@ -17,6 +18,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val rawResources = SnifferRepository.resources
     val currentSession = SessionStore.current
     val browserSession = SessionStore.browser
+    private val reportGate = CaptureReportGate()
     private val ids = AtomicLong(System.currentTimeMillis())
 
     fun recordWebResource(
@@ -35,6 +37,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val extension = ResourceClassifier.extensionFromUrl(url).ifBlank { null }
 
         val session = SessionStore.ensureBrowserSession()
+        val generation = SnifferRepository.generation
+        if (!reportGate.accept(listOf(session.id, generation, url, mimeType, width, height, durationMs,
+                thumbnailUrl, requestHeaders.entries.sortedBy { it.key.lowercase() }))) return
         val resource = Resource(
                 id = ids.getAndIncrement(),
                 sessionId = session.id,
@@ -56,7 +61,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 thumbnailUrl = thumbnailUrl?.takeIf { it.startsWith("https://") || it.startsWith("http://") },
                 mediaGroupKey = MediaIdentity.groupKey(url),
             )
-        val generation = SnifferRepository.generation
         SnifferRepository.add(resource)
         ResourceValidator.validate(resource) { validated ->
             SnifferRepository.addIfGeneration(validated, generation)

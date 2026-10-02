@@ -44,7 +44,7 @@ object ResourceValidator {
     fun validate(resource: Resource, onResult: (Resource) -> Unit) {
         val rawUrl = resource.url ?: return
         if (!rawUrl.startsWith("http://") && !rawUrl.startsWith("https://")) return
-        val key = resource.id.toString() + "|" + rawUrl
+        val key = resource.sessionId.toString() + "|" + rawUrl
         if (!inFlight.add(key)) return
         executor.execute {
             try { onResult(validateNow(resource)) } finally { inFlight.remove(key) }

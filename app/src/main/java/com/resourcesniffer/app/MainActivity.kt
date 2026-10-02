@@ -673,6 +673,7 @@ private fun browserCaptureScript(): String = """
             } catch (_) {}
           }
 
+          const reportedPosters = new WeakMap();
           function scanNode(node) {
             if (!node || node.nodeType !== 1) return;
             ["src","href","poster","data-src","data-url"].forEach(function(attr) {
@@ -680,7 +681,15 @@ private fun browserCaptureScript(): String = """
             });
             try {
               if (node.tagName === "VIDEO" && node.poster && (node.currentSrc || node.src)) {
-                try { MeerkatCapture.videoPoster(absolute(node.currentSrc || node.src), absolute(node.poster), location.href); } catch (_) {}
+                const mediaUrl = absolute(node.currentSrc || node.src);
+                const posterUrl = absolute(node.poster);
+                const posterKey = mediaUrl + "|" + posterUrl;
+                if (reportedPosters.get(node) !== posterKey) {
+                  try {
+                    MeerkatCapture.videoPoster(mediaUrl, posterUrl, location.href);
+                    reportedPosters.set(node, posterKey);
+                  } catch (_) {}
+                }
               }
               if (node.currentSrc) report(node.currentSrc, node.tagName === "IMG" ? "image/*" : node.tagName === "AUDIO" ? "audio/*" : node.tagName === "VIDEO" ? "video/*" : "");
               if (node.srcset) String(node.srcset).split(",").forEach(function(part) { report(part.trim().split(/\s+/)[0], "image/*"); });
@@ -869,7 +878,7 @@ private fun BrowserPane(
                         settings.setSupportZoom(true)
                         settings.builtInZoomControls = true
                         settings.displayZoomControls = false
-                        settings.javaScriptCanOpenWindowsAutomatically = true
+                        settings.javaScriptCanOpenWindowsAutomatically = false
                         // Keep target=_blank and window.open navigation in this configured
                         // WebView, including cookies, JavaScript and form submissions.
                         settings.setSupportMultipleWindows(false)
@@ -915,9 +924,9 @@ private fun BrowserPane(
                                     return false
                                 }
 
-                                // Convert main-frame app links automatically. Never launch
-                                // another app; subframes must not replace the current page.
-                                if (req.isForMainFrame) {
+                                // Automatic app-launch attempts must not reload the website.
+                                // Only an explicit tap may navigate to a web fallback.
+                                if (req.isForMainFrame && req.hasGesture()) {
                                     val fallback = resolveBrowsableUrl(raw)
                                     if (
                                         !fallback.isNullOrBlank() &&

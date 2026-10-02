@@ -135,3 +135,15 @@ test('associates a video poster with its media URL for list thumbnails', () => {
   assert.equal(posters[0].url, 'https://cdn.test/movie.mp4');
   assert.equal(posters[0].poster, 'https://page.test/cover.jpg');
 });
+
+test('repeated video mutations report a poster once but accept a changed source', () => {
+  const video = {nodeType:1, tagName:'VIDEO', currentSrc:'https://cdn.test/one.mp4', poster:'/one.jpg', hasAttribute:()=>false};
+  const {posters, mutate} = browser({nodes:[video]});
+  for (let i=0; i<100; i++) mutate([{target:video, addedNodes:[]}]);
+  assert.equal(posters.length, 1);
+  video.currentSrc = 'https://cdn.test/two.mp4';
+  video.poster = '/two.jpg';
+  mutate([{target:video, addedNodes:[]}]);
+  assert.equal(posters.length, 2);
+  assert.equal(posters[1].url, video.currentSrc);
+});
