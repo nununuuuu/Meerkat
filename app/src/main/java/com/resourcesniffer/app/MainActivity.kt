@@ -2,13 +2,11 @@ package com.resourcesniffer.app
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.os.Message
@@ -45,8 +43,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import com.resourcesniffer.app.capture.CaptureStatus
-import com.resourcesniffer.app.capture.CaptureSnapshot
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -70,8 +66,6 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.MoreVert
 import com.resourcesniffer.app.ui.PageTitle
 import androidx.compose.material.icons.filled.Settings
-import com.resourcesniffer.app.capture.ForegroundCapture
-import com.resourcesniffer.app.settings.BrowserAccounts
 import com.resourcesniffer.app.settings.SettingsPane
 import com.resourcesniffer.app.settings.UpdateController
 import com.resourcesniffer.app.settings.UpdatePrompt
@@ -154,7 +148,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class MainMode { BROWSER, EXTERNAL, RESOURCES, DOWNLOADS, SETTINGS }
+private enum class MainMode { BROWSER, RESOURCES, DOWNLOADS, SETTINGS }
 
 private enum class UiResourceCategory(val label: String) {
     IMAGE("圖片"),
@@ -181,39 +175,16 @@ private fun MeerkatApp(
     val context = LocalContext.current
     val resources by viewModel.resources.collectAsStateWithLifecycle()
     val downloads by DownloadRegistry.items.collectAsStateWithLifecycle()
-    val currentSession by viewModel.currentSession.collectAsStateWithLifecycle()
     val browserSession by viewModel.browserSession.collectAsStateWithLifecycle()
-    val externalSession by viewModel.externalSession.collectAsStateWithLifecycle()
-    val captureStatus by CaptureStatus.state.collectAsStateWithLifecycle()
-    val externalCaptureActive = captureStatus.running
-    var mode by remember { mutableStateOf(if (incomingUrl != null) MainMode.BROWSER else MainMode.RESOURCES) }
+    var mode by remember { mutableStateOf(MainMode.BROWSER) }
     var address by remember { mutableStateOf(incomingUrl.orEmpty()) }
     var webView by remember { mutableStateOf<WebView?>(null) }
-    var blockQuic by remember { mutableStateOf(captureStatus.blockQuic) }
-    var inspectHttps by remember { mutableStateOf(captureStatus.httpsEnabled) }
-    LaunchedEffect(captureStatus.running, captureStatus.httpsEnabled, captureStatus.blockQuic) {
-        if (captureStatus.running) {
-            blockQuic = captureStatus.blockQuic
-            inspectHttps = captureStatus.httpsEnabled
-        }
-    }
     val overlayRunning by OverlayService.running.collectAsStateWithLifecycle()
     var overlayWanted by remember { mutableStateOf(false) }
-    var manualCaConfirmed by remember { mutableStateOf(viewModel.isMitmCaManuallyConfirmed()) }
-    var showCaConfirmation by remember { mutableStateOf(false) }
-    var mitmCaInstalled by remember { mutableStateOf(viewModel.isMitmCaInstalled()) }
-
     androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-        mitmCaInstalled = viewModel.isMitmCaInstalled()
-        manualCaConfirmed = viewModel.isMitmCaManuallyConfirmed()
         UpdateController.onForeground(context)
     }
-
     val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
-    val caSettingsLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        mitmCaInstalled = viewModel.isMitmCaInstalled()
-        manualCaConfirmed = viewModel.isMitmCaManuallyConfirmed()
-    }
     val overlayLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         if (overlayWanted && Settings.canDrawOverlays(context)) {
             viewModel.startOverlay()
@@ -225,20 +196,11 @@ private fun MeerkatApp(
         if (!enabled) {
             viewModel.stopOverlay()
         } else if (Settings.canDrawOverlays(context)) {
+            if (Build.VERSION.SDK_INT >= 33) notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             viewModel.startOverlay()
         } else {
             overlayLauncher.launch(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                 Uri.parse("package:${context.packageName}")))
-        }
-    }
-
-    val beginGlobalCapture: () -> Unit = {
-        viewModel.startExternalCapture(blockQuic, inspectHttps)
-    }
-
-    val vpnLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            beginGlobalCapture()
         }
     }
 
@@ -259,21 +221,6 @@ private fun MeerkatApp(
 
     MeerkatTheme {
         UpdatePrompt()
-        if (showCaConfirmation) {
-            AlertDialog(
-                onDismissRequest = { showCaConfirmation = false },
-                title = { Text("確認已安裝目前的 CA") },
-                text = { Text("請確認安裝的是本版本匯出的 Meerkat-Local-CA.crt。重新安裝 App 後，舊憑證可能已不相符。確認後請重新開始全域嗅探。手動確認不代表其他 App 一定信任憑證。") },
-                confirmButton = {
-                    TextButton(onClick = {
-                        viewModel.confirmMitmCaInstalled()
-                        manualCaConfirmed = true
-                        showCaConfirmation = false
-                    }) { Text("已安裝，啟用嘗試") }
-                },
-                dismissButton = { TextButton(onClick = { showCaConfirmation = false }) { Text("取消") } },
-            )
-        }
         Scaffold(
             bottomBar = {
                 NavigationBar {
@@ -282,12 +229,6 @@ private fun MeerkatApp(
                         onClick = { mode = MainMode.BROWSER },
                         icon = { Icon(Icons.Default.Public, null) },
                         label = { Text("瀏覽器") },
-                    )
-                    NavigationBarItem(
-                        selected = mode == MainMode.EXTERNAL,
-                        onClick = { mode = MainMode.EXTERNAL },
-                        icon = { Icon(Icons.Default.Public, null) },
-                        label = { Text("App") },
                     )
                     NavigationBarItem(
                         selected = mode == MainMode.RESOURCES,
@@ -332,64 +273,12 @@ private fun MeerkatApp(
                 )
                 when (mode) {
                     MainMode.BROWSER -> Unit
-                    MainMode.EXTERNAL -> ExternalAppPane(
-                        captureActive = externalCaptureActive,
-                        captureStatus = captureStatus,
-                        resourceCount = resources.count { it.sessionId == externalSession?.id },
-                        blockQuic = blockQuic,
-                        inspectHttps = inspectHttps,
-                        onInspectHttpsChange = { inspectHttps = it },
-                        onBlockQuicChange = {
-                            blockQuic = it
-                            if (captureStatus.running) viewModel.updateBlockQuic(it)
-                        },
-                        overlayRunning = overlayRunning,
-                        onOverlayChange = setOverlay,
-                        caManuallyConfirmed = manualCaConfirmed,
-                        onConfirmCa = { showCaConfirmation = true },
-                        onStart = {
-                            if (Build.VERSION.SDK_INT >= 33) {
-                                notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                            }
-                            val prepare = VpnService.prepare(context)
-                            if (!ForegroundCapture.hasPermission(context)) {
-                                context.startActivity(Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS))
-                            } else if (prepare != null) {
-                                vpnLauncher.launch(prepare)
-                            } else {
-                                beginGlobalCapture()
-                            }
-                        },
-                        onStop = {
-                            viewModel.stopExternalCapture()
-                        },
-                        caInstalled = mitmCaInstalled,
-                        caFingerprint = viewModel.mitmCaFingerprint(),
-                        onInstallCa = {
-                            runCatching {
-                                viewModel.exportMitmCaCertificate()
-                            }.onSuccess {
-                                Toast.makeText(
-                                    context,
-                                    "已匯出到 Downloads/Meerkat/Meerkat-Local-CA.crt",
-                                    Toast.LENGTH_LONG,
-                                ).show()
-                                caSettingsLauncher.launch(viewModel.caSettingsIntent())
-                            }.onFailure { error ->
-                                Toast.makeText(
-                                    context,
-                                    "CA 匯出失敗：${error.message ?: "未知錯誤"}",
-                                    Toast.LENGTH_LONG,
-                                ).show()
-                            }
-                        },
-                    )
                     MainMode.RESOURCES -> ResourcePane(
                         resources = resources,
                         onClear = viewModel::clear,
                     )
                     MainMode.DOWNLOADS -> DownloadsPane(downloads)
-                    MainMode.SETTINGS -> SettingsPane(onOpenWebsite = { url ->
+                    MainMode.SETTINGS -> SettingsPane(overlayRunning = overlayRunning, onOverlayChange = setOverlay, onOpenWebsite = { url ->
                         address = url
                         mode = MainMode.BROWSER
                         webView?.loadBrowserUrl(url)
@@ -941,8 +830,6 @@ private fun BrowserPane(
             }
         }
 
-        BrowserAccounts(webView)
-
         if (loading) {
             LinearProgressIndicator(
                 progress = { progress.coerceIn(0, 100) / 100f },
@@ -1284,112 +1171,6 @@ private fun BrowserPane(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun ExternalAppPane(
-    captureActive: Boolean,
-    captureStatus: CaptureSnapshot,
-    resourceCount: Int,
-    blockQuic: Boolean,
-    inspectHttps: Boolean,
-    onInspectHttpsChange: (Boolean) -> Unit,
-    onBlockQuicChange: (Boolean) -> Unit,
-    overlayRunning: Boolean,
-    onOverlayChange: (Boolean) -> Unit,
-    caManuallyConfirmed: Boolean,
-    onConfirmCa: () -> Unit,
-    onStart: () -> Unit,
-    onStop: () -> Unit,
-    caInstalled: Boolean,
-    caFingerprint: String,
-    onInstallCa: () -> Unit,
-) {
-    var showCertificate by remember { mutableStateOf(false) }
-    var showDiagnostics by remember { mutableStateOf(false) }
-    val context = LocalContext.current
-    val caReady = caInstalled || caManuallyConfirmed
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
-    ) {
-        PageTitle("App 嗅探")
-        ElevatedCard(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(if (captureStatus.starting) "正在啟動" else if (captureActive) "嗅探中" else "已停止",
-                    style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
-                if (captureActive) Text("目前前景：${captureStatus.foregroundApp}", style = MaterialTheme.typography.bodyMedium)
-                Text("已找到 $resourceCount 項資源", style = MaterialTheme.typography.titleMedium)
-                val hint = when {
-                    captureStatus.error != null -> captureStatus.error
-                    captureActive && !captureStatus.httpsEnabled -> "HTTPS 目前只轉送。啟用下方解密選項後重新開始，才能嘗試讀取媒體網址。"
-                    captureActive && captureStatus.opaqueTlsConnections > 0 && captureStatus.decryptedConnections == 0L ->
-                        "尚未完成 HTTPS 解密。若 App 拒絕代理憑證，可把分享的貼文網址放到內建瀏覽器開啟。"
-                    captureActive && resourceCount == 0 -> "在前景 App 重新載入或播放內容，以建立新的媒體連線。"
-                    else -> null
-                }
-                hint?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                TextButton(onClick = { showDiagnostics = !showDiagnostics }) { Text(if (showDiagnostics) "收起連線診斷" else "連線診斷") }
-                if (showDiagnostics) {
-                    HorizontalDivider()
-                    Text(captureStatus.summary(), style = MaterialTheme.typography.bodySmall)
-                    captureStatus.tlsFailureDetails?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                    TextButton(onClick = {
-                        val report = "目前前景：${captureStatus.foregroundApp}\n" + captureStatus.summary() +
-                            (captureStatus.tlsFailureDetails?.let { "\n$it" } ?: "")
-                        context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("嗅探診斷", report))
-                        Toast.makeText(context, "已複製診斷", Toast.LENGTH_SHORT).show()
-                    }) { Text("複製診斷") }
-                }
-            }
-        }
-        ElevatedCard(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text("嗅探設定", style = MaterialTheme.typography.titleMedium)
-                Text("只收錄目前前景 App 的新連線。首次使用需授予使用情況存取權。",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (!caReady) {
-                    Text("安裝 CA 後可嘗試 HTTPS 解密", style = MaterialTheme.typography.titleSmall)
-                    Button(onClick = onInstallCa, modifier = Modifier.fillMaxWidth()) { Text("安裝 CA 憑證") }
-                    TextButton(onClick = onConfirmCa) { Text("我已安裝目前的 CA") }
-                } else {
-                    Text(if (caInstalled) "CA 憑證已核對" else "CA 已手動確認，尚未由系統核對",
-                        style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
-                }
-                TextButton(onClick = { showCertificate = !showCertificate }) { Text(if (showCertificate) "收起憑證資訊" else "憑證資訊") }
-                if (showCertificate) {
-                    Text("CA SHA-256：$caFingerprint", style = MaterialTheme.typography.bodySmall)
-                    Text("App 內覆蓋更新通常沿用此憑證。已安裝 CA 仍不代表所有 App 都會信任它。",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (caReady) TextButton(onClick = onInstallCa) { Text("匯出目前 CA") }
-                }
-                HorizontalDivider()
-                CaptureOption("HTTPS 解密", "部分 App 不信任使用者 CA，可能無法解析。變更後需重新開始嗅探。",
-                    inspectHttps, onInspectHttpsChange, !captureActive && !captureStatus.starting && caReady)
-                CaptureOption("停用 HTTP/3", "嘗試讓前景 App 改用 TCP；若內容無法載入，請關閉。",
-                    blockQuic, onBlockQuicChange, !captureStatus.starting)
-                HorizontalDivider()
-                if (captureActive || captureStatus.starting) {
-                    OutlinedButton(onClick = onStop, modifier = Modifier.fillMaxWidth()) { Text("停止嗅探") }
-                } else {
-                    Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) { Text("開始嗅探") }
-                }
-                HorizontalDivider()
-                CaptureOption("懸浮球", "在其他 App 上查看狀態與資源數量。", overlayRunning, onOverlayChange)
-            }
-        }
-    }
-}
-
-@Composable
-private fun CaptureOption(title: String, description: String, checked: Boolean, onChange: (Boolean) -> Unit, enabled: Boolean = true) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
-            Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
     }
 }
 

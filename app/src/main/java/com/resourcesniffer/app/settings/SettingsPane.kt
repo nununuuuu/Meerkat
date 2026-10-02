@@ -52,7 +52,7 @@ fun UpdatePrompt() {
 }
 
 @Composable
-fun SettingsPane(onOpenWebsite: (String) -> Unit) {
+fun SettingsPane(overlayRunning: Boolean, onOverlayChange: (Boolean) -> Unit, onOpenWebsite: (String) -> Unit) {
     val context = LocalContext.current
     val state by UpdateController.state.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { UpdateController.initialize(context) }
@@ -78,6 +78,15 @@ fun SettingsPane(onOpenWebsite: (String) -> Unit) {
                 }
                 if (state.downloading) TextButton(onClick = UpdateController::cancel) { Text("取消下載") }
                 Text("下載及驗證皆在 App 內完成；Android 最後會要求確認安裝。", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        ElevatedCard(Modifier.fillMaxWidth()) {
+            Row(Modifier.padding(16.dp).fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("懸浮球", style = MaterialTheme.typography.titleMedium)
+                    Text("查看內建瀏覽器找到的資源，並快速返回資源頁。", style = MaterialTheme.typography.bodySmall)
+                }
+                Switch(checked = overlayRunning, onCheckedChange = onOverlayChange)
             }
         }
         WebsiteAccounts(onOpenWebsite)

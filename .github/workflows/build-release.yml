@@ -32,39 +32,18 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.25.x"
-          cache: false
-
-      - name: Install Android NDK
+      - name: Install Android SDK platform
         run: |
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "ndk;27.2.12479018"
           "$SDKMANAGER" "platforms;android-37.2"
-
-      - name: Build gVisor netstack bridge
-        env:
-          GOTOOLCHAIN: auto
-        run: |
-          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
-          git clone --depth 1 https://github.com/IEAmir/NetValve.git /tmp/netvalve
-          cd /tmp/netvalve/netstack
-          go get -tool golang.org/x/mobile/cmd/gobind@latest
-          go mod tidy
-          chmod +x build-aar.sh
-          ./build-aar.sh arm64
-          mkdir -p "$GITHUB_WORKSPACE/app/libs"
-          cp ../app/libs/netstack.aar "$GITHUB_WORKSPACE/app/libs/netstack.aar"
 
       - name: Set up Gradle 9.6.0
         uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: "9.6.0"
 
-      - name: Test browser capture and credential filling
+      - name: Test browser capture
         run: node --test scripts/test-*.cjs
 
       - name: Test and build debug APK

@@ -24,7 +24,6 @@ import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.resourcesniffer.app.MainActivity
 import com.resourcesniffer.app.R
-import com.resourcesniffer.app.capture.CaptureStatus
 import com.resourcesniffer.app.core.ResourceType
 import com.resourcesniffer.app.repository.SnifferRepository
 import com.resourcesniffer.app.repository.SessionStore
@@ -43,15 +42,9 @@ class OverlayService : Service() {
     private var panel: View? = null
     private var panelParams: WindowManager.LayoutParams? = null
     private var panelCorner: OverlayCorner? = null
-    private var lastSessionId = 0L
     private val handler = Handler(Looper.getMainLooper())
 
-    private fun resourceSessionId(): Long {
-        val external = SessionStore.externalIdOrDefault()
-        if (external != 0L) lastSessionId = external
-        if (lastSessionId == 0L) return SessionStore.browserIdOrDefault()
-        return lastSessionId
-    }
+    private fun resourceSessionId(): Long = SessionStore.browserIdOrDefault()
 
     private val updateCount = object : Runnable {
         override fun run() {
@@ -346,12 +339,7 @@ class OverlayService : Service() {
 
     private fun buildSummary(items: List<com.resourcesniffer.app.core.Resource>): String {
         if (items.isEmpty()) {
-            val status = CaptureStatus.state.value
-            val hint = if (status.running && status.httpsEnabled &&
-                status.decryptedConnections == 0L && status.quicConnections > 0L) {
-                "\n目前尚未解析 HTTPS；UDP/443 流量只能轉送。可將貼文網址貼到 Meerkat 內建瀏覽器重試。"
-            } else ""
-            return "目前前景：${status.foregroundApp}\n" + status.summary() + "\n尚未找到可下載資源" + hint
+            return "尚未找到可下載資源\n在 Meerkat 內建瀏覽器開啟網頁並播放內容，或從其他 App 分享網址到 Meerkat。"
         }
         val imageCount = items.count { it.type == ResourceType.IMAGE }
         val videoCount = items.count {
@@ -363,7 +351,7 @@ class OverlayService : Service() {
                 it.type == ResourceType.ARCHIVE ||
                 it.type == ResourceType.OTHER
         }
-        return CaptureStatus.state.value.summary() + "\n圖片 $imageCount　影片 $videoCount\n" +
+        return "內建瀏覽器資源\n圖片 $imageCount　影片 $videoCount\n" +
             "文件 $documentCount　其他 $otherCount\n" +
             "總計 ${items.size}"
     }

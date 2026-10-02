@@ -43,7 +43,7 @@ internal fun WebsiteAccounts(onOpenWebsite: (String) -> Unit) {
     ElevatedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("常用網站與帳號", style = MaterialTheme.typography.titleLarge)
-            Text("帳號與密碼加密保存在本機。開啟網站後，按瀏覽器的「帶入帳密」登入；登入狀態會保留。", style = MaterialTheme.typography.bodySmall)
+            Text("帳號與密碼加密保存在本機。請在內建瀏覽器手動登入網站，登入狀態會保留。", style = MaterialTheme.typography.bodySmall)
             storageError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             OutlinedButton(enabled = loaded.isSuccess, onClick = { editing = WebsiteAccount(UUID.randomUUID().toString(), "", "", "") }) { Text("新增網站／帳號") }
             entries.forEach { account ->

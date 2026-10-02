@@ -3,11 +3,8 @@ package com.resourcesniffer.app.ui
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
-import android.provider.Settings
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
-import com.resourcesniffer.app.capture.MitmCertificateAuthority
-import com.resourcesniffer.app.capture.SnifferVpnService
 import com.resourcesniffer.app.core.MediaIdentity
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ResourceClassifier
@@ -23,7 +20,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val rawResources = SnifferRepository.resources
     val currentSession = SessionStore.current
     val browserSession = SessionStore.browser
-    val externalSession = SessionStore.external
     private val ids = AtomicLong(System.currentTimeMillis())
 
     fun recordWebResource(
@@ -104,56 +100,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         )
     }
-    fun exportMitmCaCertificate(): Uri =
-        MitmCertificateAuthority(getApplication<Application>()).exportToDownloads()
-
-    fun caSettingsIntent(): Intent =
-        Intent(Settings.ACTION_SECURITY_SETTINGS)
-
-    fun isMitmCaInstalled(): Boolean =
-        MitmCertificateAuthority(getApplication<Application>()).isInstalledInAndroidCaStore()
-
-    fun isMitmCaManuallyConfirmed(): Boolean =
-        MitmCertificateAuthority(getApplication<Application>()).isManuallyConfirmed()
-
-    fun confirmMitmCaInstalled() = MitmCertificateAuthority(getApplication<Application>()).confirmInstalled()
-
-    fun updateBlockQuic(enabled: Boolean) {
-        val context = getApplication<Application>()
-        context.startService(Intent(context, SnifferVpnService::class.java).apply {
-            action = SnifferVpnService.ACTION_UPDATE_QUIC
-            putExtra(SnifferVpnService.EXTRA_BLOCK_QUIC, enabled)
-        })
-    }
-
     fun stopOverlay() {
         getApplication<Application>().stopService(Intent(getApplication<Application>(), OverlayService::class.java))
-    }
-
-    fun mitmCaFingerprint(): String =
-        MitmCertificateAuthority(getApplication<Application>()).fingerprintSha256()
-    fun startExternalCapture(blockQuic: Boolean = false, inspectHttps: Boolean = false) {
-        val context = getApplication<Application>()
-        ContextCompat.startForegroundService(
-            context,
-            Intent(context, SnifferVpnService::class.java).apply {
-                action = SnifferVpnService.ACTION_START
-                putExtra(SnifferVpnService.EXTRA_BLOCK_QUIC, blockQuic)
-                putExtra(
-                    SnifferVpnService.EXTRA_ENABLE_HTTPS_MITM,
-                    inspectHttps && MitmCertificateAuthority(context).let { it.isInstalledInAndroidCaStore() || it.isManuallyConfirmed() },
-                )
-            }
-        )
-    }
-
-    fun stopExternalCapture() {
-        val context = getApplication<Application>()
-        context.startService(
-            Intent(context, SnifferVpnService::class.java).apply {
-                action = SnifferVpnService.ACTION_STOP
-            }
-        )
     }
 
     fun startOverlay() {

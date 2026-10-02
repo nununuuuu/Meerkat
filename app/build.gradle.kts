@@ -16,7 +16,7 @@ android {
         minSdk = 29
         targetSdk = 36
         versionCode = 1000 + (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0)
-        versionName = "0.6.0-beta7"
+        versionName = "0.6.0-beta8"
         buildConfigField("int", "BUILD_NUMBER", System.getenv("GITHUB_RUN_NUMBER") ?: "0")
     }
 
@@ -65,10 +65,7 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-hls:1.7.1")
     implementation("androidx.media3:media3-exoplayer-dash:1.7.1")
     implementation("androidx.media3:media3-ui:1.7.1")
-    implementation("org.bouncycastle:bcprov-jdk18on:1.82")
-    implementation("org.bouncycastle:bcpkix-jdk18on:1.82")
     implementation("org.brotli:dec:0.1.2")
-    implementation(files("libs/netstack.aar"))
 
     testImplementation("junit:junit:4.13.2")
 

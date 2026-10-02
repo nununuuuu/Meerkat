@@ -40,7 +40,7 @@ Build and test results: https://github.com/$GH_REPO/actions/runs/$GITHUB_RUN_ID
 
 JVM unit tests and the APK build passed before publication.
 This APK uses the fixed development signing identity for compatible updates.
-A user CA does not bypass another app's certificate pinning or trust restrictions.
+Resource capture now uses the built-in browser. Global VPN capture and credential filling have been removed.
 NOTES
 gh release create "$TAG" "release-assets/$ASSET" "release-assets/$ASSET.sha256" \
     --target "$GITHUB_SHA" --title "Meerkat $TAG" --prerelease \
