@@ -433,9 +433,11 @@ private fun browserCaptureScript(): String = """
           if (window.__meerkatCaptureInstalled) return;
           window.__meerkatCaptureInstalled = true;
 
-          const MAX_TEXT = 1024 * 1024;
-          // Kotlin raw strings preserve backslashes: these are JavaScript escapes.
-          const RESOURCE_RE = /https?:\/\/[^\s"'<>\\]+|(?:\/{1,2}|\.\.?\/)?[^\s"'<>\\{}]+?\.(?:m3u8|mpd|mp4|m4v|webm|mkv|mov|avi|m4a|mp3|aac|flac|ogg|opus|wav|jpg|jpeg|png|webp|gif|avif|bmp|svg|heic|heif|pdf|epub|doc|docx|docm|dot|dotx|xls|xlsx|xlsm|xlsb|ppt|pptx|pptm|pps|ppsx|odt|ods|odp|pages|numbers|key|txt|csv|tsv|rtf|md|zip|rar|7z|tar|gz)(?:\?[^\s"'<>\\]*)?/ig;
+          const MAX_TEXT = 256 * 1024;
+          // Tokenize once; an unanchored filename regex can rescan long opaque
+          // strings at every character and block the site's JavaScript thread.
+          const TOKEN_RE = /[^\s"'<>\\{}]+/g;
+          const FILE_RE = /\.(?:m3u8|mpd|mp4|m4v|webm|mkv|mov|avi|m4a|mp3|aac|flac|ogg|opus|wav|jpg|jpeg|png|webp|gif|avif|bmp|svg|heic|heif|pdf|epub|doc|docx|docm|dot|dotx|xls|xlsx|xlsm|xlsb|ppt|pptx|pptm|pps|ppsx|odt|ods|odp|pages|numbers|key|txt|csv|tsv|rtf|md|zip|rar|7z|tar|gz)(?:[?#]|$)/i;
           const reported = new Set();
 
           function absolute(value) {
@@ -460,23 +462,31 @@ private fun browserCaptureScript(): String = """
             if (typeof value !== "string" || !value) return;
             let text = value.length > MAX_TEXT ? value.slice(0, MAX_TEXT) : value;
             text = text.replace(/\\\//g, "/").replace(/\\u002[fF]/g, "/").replace(/&amp;/g, "&");
-            RESOURCE_RE.lastIndex = 0;
-            let match, count = 0;
-            while ((match = RESOURCE_RE.exec(text)) && count < 256) {
-              const raw = match[0].replace(/^['"]|['",;)}\]]+$/g, "");
+            TOKEN_RE.lastIndex = 0;
+            let match, tokens = 0, reports = 0;
+            while (tokens++ < 4096 && reports < 256 && (match = TOKEN_RE.exec(text))) {
+              if (match[0].length > 8192) continue;
+              let raw = match[0].replace(/^[\[(:,;]+|[',;)}\]]+$/g, "");
+              const start = raw.search(/https?:\/\//i);
+              if (start >= 0) raw = raw.slice(start);
+              else if (!FILE_RE.test(raw)) continue;
               report(raw, "");
-              count++;
+              reports++;
             }
           }
 
           // Player configuration often contains extensionless signed media URLs.
           function scanJson(value) {
             let remaining = 1024;
+            let remainingText = MAX_TEXT;
             const seen = new WeakSet();
             function visit(item, depth) {
               if (--remaining < 0 || depth > 12) return;
               if (typeof item === "string") {
-                scanText(item);
+                if (remainingText <= 0) return;
+                const amount = Math.min(item.length, remainingText);
+                remainingText -= amount;
+                scanText(item.slice(0, amount));
               } else if (item && typeof item === "object" && !seen.has(item)) {
                 seen.add(item);
                 Object.keys(item).slice(0, 256).forEach(function(key) {

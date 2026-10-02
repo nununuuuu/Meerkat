@@ -52,7 +52,7 @@ function browser({nodes = [], inline = [], fetchResponse, performanceEntries = [
       videoPoster(url, poster, referer) { posters.push({url, poster, referer}); }},
   });
   context.window = context;
-  vm.runInContext(script, context);
+  vm.runInContext(script, context, {timeout: 1000});
   return {context, reports, posters, Response, mutate: records => mutation(records)};
 }
 
@@ -146,4 +146,18 @@ test('repeated video mutations report a poster once but accept a changed source'
   mutate([{target:video, addedNodes:[]}]);
   assert.equal(posters.length, 2);
   assert.equal(posters[1].url, video.currentSrc);
+});
+
+
+test('large opaque page data does not block initialization or invent resources', () => {
+  const {reports} = browser({inline:[{textContent:'A'.repeat(200000)}]});
+  assert.equal(reports.length, 0);
+});
+
+test('large JSON strings remain intact and scanning has a shared work budget', () => {
+  const {context, reports} = browser();
+  context.payload = JSON.stringify({data:'A'.repeat(200000), media:'https://cdn.test/movie.mp4'});
+  const length = vm.runInContext('JSON.parse(payload).data.length', context, {timeout:1000});
+  assert.equal(length, 200000);
+  assert.ok(reports.some(r => r.url === 'https://cdn.test/movie.mp4'));
 });
