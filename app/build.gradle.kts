@@ -66,6 +66,8 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-dash:1.7.1")
     implementation("androidx.media3:media3-ui:1.7.1")
     implementation("org.brotli:dec:0.1.2")
+    implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("io.coil-kt:coil-svg:2.7.0")
 
     testImplementation("junit:junit:4.13.2")
 

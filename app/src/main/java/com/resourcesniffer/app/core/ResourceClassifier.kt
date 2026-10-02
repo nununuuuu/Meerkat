@@ -23,6 +23,7 @@ object ResourceClassifier {
         mimeType?.lowercase()?.substringBefore(';')?.trim().orEmpty()
 
     fun classify(url: String?, mimeType: String?): Classification {
+        if (ResourceEligibility.isPageOrBackgroundResponse(url, mimeType)) return Classification(ResourceType.OTHER)
         val mime = normalizeMime(mimeType)
         val ext = extensionFromUrl(url)
 

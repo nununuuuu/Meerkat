@@ -57,7 +57,7 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.MoreVert
+import com.resourcesniffer.app.ui.ResourceThumbnail
 import com.resourcesniffer.app.ui.PageTitle
 import androidx.compose.material.icons.filled.Settings
 import com.resourcesniffer.app.settings.SettingsPane
@@ -289,6 +289,16 @@ private class BrowserCaptureBridge(
                 "Cookie" to (CookieManager.getInstance().getCookie(target) ?: ""),
             ),
         )
+    }
+
+    @JavascriptInterface
+    fun videoPoster(url: String?, poster: String?, referer: String?) {
+        if (url == null || poster == null || !url.startsWith("http") || !poster.startsWith("http")) return
+        viewModel.recordWebResource(url, "video/*", mapOf(
+            "Referer" to referer.orEmpty(),
+            "User-Agent" to browserUserAgent(context, referer.orEmpty()),
+            "Cookie" to (CookieManager.getInstance().getCookie(url) ?: ""),
+        ), thumbnailUrl = poster)
     }
 
     @JavascriptInterface
@@ -669,6 +679,9 @@ private fun browserCaptureScript(): String = """
               try { if (node.hasAttribute && node.hasAttribute(attr)) report(node.getAttribute(attr), ""); } catch (_) {}
             });
             try {
+              if (node.tagName === "VIDEO" && node.poster && (node.currentSrc || node.src)) {
+                try { MeerkatCapture.videoPoster(absolute(node.currentSrc || node.src), absolute(node.poster), location.href); } catch (_) {}
+              }
               if (node.currentSrc) report(node.currentSrc, node.tagName === "IMG" ? "image/*" : node.tagName === "AUDIO" ? "audio/*" : node.tagName === "VIDEO" ? "video/*" : "");
               if (node.srcset) String(node.srcset).split(",").forEach(function(part) { report(part.trim().split(/\s+/)[0], "image/*"); });
             } catch (_) {}
@@ -1167,20 +1180,13 @@ private fun ResourcePane(
     }
 
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        var showActions by remember { mutableStateOf(false) }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             PageTitle("資源", Modifier.weight(1f))
-            Box {
-                IconButton(onClick = { showActions = true }) { Icon(Icons.Default.MoreVert, contentDescription = "資源操作") }
-                DropdownMenu(expanded = showActions, onDismissRequest = { showActions = false }) {
-                    DropdownMenuItem(text = { Text(if (selectionMode) "取消選取" else "批次選取") }, onClick = {
-                        showActions = false
-                        selectionMode = !selectionMode
-                        if (!selectionMode) selectedIds = emptySet()
-                    })
-                    DropdownMenuItem(text = { Text("清空歷史") }, onClick = { showActions = false; onClear() })
-                }
-            }
+            TextButton(onClick = {
+                selectionMode = !selectionMode
+                if (!selectionMode) selectedIds = emptySet()
+            }) { Text(if (selectionMode) "取消選取" else "批次選取") }
+            TextButton(onClick = onClear) { Text("清空歷史") }
         }
         if (selectionMode) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -1325,25 +1331,16 @@ private fun ResourceRow(
                         onCheckedChange = { onToggleSelected() },
                     )
                 }
-                Surface(
-                    shape = MaterialTheme.shapes.medium,
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                ) {
-                    Box(
-                        modifier = Modifier.size(42.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = resourceTypeIcon(resource.type),
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        )
-                    }
+                ResourceThumbnail(resource, onClick = { showPreview = true }) {
+                    Icon(resourceTypeIcon(resource.type), contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer)
                 }
 
                 Column(Modifier.weight(1f)) {
                     Text(
                         resourceSummaryTitle(resource),
+                        maxLines = 2,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                     )
@@ -1368,7 +1365,7 @@ private fun ResourceRow(
 
             if (resource.validationState == ValidationState.FAILED) {
                 Text(
-                    "連結檢查失敗，可能已過期或需要登入；預覽和下載可能無法使用。",
+                    "未能確認連結是否可用，可嘗試預覽或重新開啟來源頁取得資源。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )
@@ -1847,12 +1844,13 @@ private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
             try { return new URL(url, document.baseURI).href; } catch (_) { return null; }
           }
 
-          function put(url, kind, w, h, duration) {
+          function put(url, kind, w, h, duration, poster) {
             if (map.size >= MAX_RESULTS) return;
             url = abs(url);
             if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) return;
             const old = map.get(url) || {url:url, kind:null, width:null, height:null, duration:null};
             if (kind) old.kind = kind;
+            if (poster) old.poster = abs(poster);
             if (Number(w) > Number(old.width || 0)) old.width = Number(w);
             if (Number(h) > Number(old.height || 0)) old.height = Number(h);
             if (isFinite(duration) && Number(duration) > Number(old.duration || 0)) old.duration = Number(duration);
@@ -1887,10 +1885,10 @@ private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
           });
 
           Array.from(document.querySelectorAll('video')).slice(0, 24).forEach(video => {
-            put(video.currentSrc || video.src, 'video', video.videoWidth, video.videoHeight, video.duration);
+            put(video.currentSrc || video.src, 'video', video.videoWidth, video.videoHeight, video.duration, video.poster);
             if (video.poster) put(video.poster, 'image', null, null, null);
             Array.from(video.querySelectorAll('source[src]')).slice(0, 8).forEach(e =>
-              put(e.src, 'video', video.videoWidth, video.videoHeight, video.duration)
+              put(e.src, 'video', video.videoWidth, video.videoHeight, video.duration, video.poster)
             );
           });
 
@@ -1960,6 +1958,7 @@ private fun scanDomResources(webView: WebView, viewModel: MainViewModel) {
                         width = width,
                         height = height,
                         durationMs = durationMs,
+                        thumbnailUrl = item.optString("poster").takeIf { it.isNotBlank() },
                     )
                 }
             }

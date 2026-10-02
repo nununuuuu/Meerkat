@@ -11,6 +11,7 @@ const domScript = source.match(/private fun scanDomResources[\s\S]*?val script =
 
 function browser({nodes = [], inline = [], fetchResponse, performanceEntries = [], pageUrl = "https://page.test/folder/"} = {}) {
   const reports = [];
+  const posters = [];
   let mutation;
   class BrowserURL extends URL {
     static createObjectURL() { return 'blob:https://page.test/blob'; }
@@ -47,11 +48,12 @@ function browser({nodes = [], inline = [], fetchResponse, performanceEntries = [
       observe() {}
     },
     fetch: () => Promise.resolve(fetchResponse || new Response('https://cdn.test/asset', 'video/mp4')),
-    MeerkatCapture: {resource(url, mime, referer) { reports.push({url, mime, referer}); }},
+    MeerkatCapture: {resource(url, mime, referer) { reports.push({url, mime, referer}); },
+      videoPoster(url, poster, referer) { posters.push({url, poster, referer}); }},
   });
   context.window = context;
   vm.runInContext(script, context);
-  return {context, reports, Response, mutate: records => mutation(records)};
+  return {context, reports, posters, Response, mutate: records => mutation(records)};
 }
 
 function image(src) {
@@ -124,4 +126,12 @@ test('authentication documents keep browser APIs untouched', () => {
     assert.equal(vm.runInContext('JSON.parse.toString().includes("[native code]")', context), true, path);
     assert.equal(reports.length, 0, path);
   }
+});
+
+
+test('associates a video poster with its media URL for list thumbnails', () => {
+  const {posters} = browser({nodes:[{nodeType:1, tagName:'VIDEO', currentSrc:'https://cdn.test/movie.mp4', poster:'/cover.jpg', hasAttribute:()=>false}]});
+  assert.equal(posters.length, 1);
+  assert.equal(posters[0].url, 'https://cdn.test/movie.mp4');
+  assert.equal(posters[0].poster, 'https://page.test/cover.jpg');
 });

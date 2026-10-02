@@ -2,6 +2,7 @@ package com.resourcesniffer.app.repository
 
 import android.content.Context
 import android.net.Uri
+import com.resourcesniffer.app.core.ResourceEligibility
 import com.resourcesniffer.app.core.MediaIdentity
 import com.resourcesniffer.app.core.Resource
 import com.resourcesniffer.app.core.ValidationState
@@ -45,6 +46,16 @@ object SnifferRepository {
 
     @Synchronized
     fun add(resource: Resource) {
+        if (ResourceEligibility.isPageOrBackgroundResponse(resource.finalUrl ?: resource.url, resource.mimeType, resource.fileName)) {
+            // Remove a provisional media candidate if validation reveals an HTML page.
+            val kept = _resources.value.filterNot {
+                it.sessionId == resource.sessionId && (it.id == resource.id || it.url == resource.url)
+            }
+            _resources.value = kept
+            recomputePreferred(kept)
+            schedulePersist()
+            return
+        }
         val current = _resources.value
         val resourceKey = MediaIdentity.exactKey(resource.finalUrl ?: resource.url)
         val existing = current.indexOfFirst {
@@ -67,6 +78,7 @@ object SnifferRepository {
                 mimeType = preferred.mimeType ?: secondary.mimeType,
                 fileName = resource.fileName ?: old.fileName,
                 localCachePath = resource.localCachePath ?: old.localCachePath,
+                thumbnailUrl = resource.thumbnailUrl ?: old.thumbnailUrl,
                 contentLength = maxOfNullable(old.contentLength, resource.contentLength),
                 referer = preferred.referer ?: secondary.referer,
                 userAgent = preferred.userAgent ?: secondary.userAgent,
@@ -167,6 +179,7 @@ object SnifferRepository {
 
     private fun recomputePreferred(all: List<Resource>) {
         _preferredResources.value = all
+            .filterNot { ResourceEligibility.isPageOrBackgroundResponse(it.finalUrl ?: it.url, it.mimeType, it.fileName) }
             .groupBy { it.sessionId to (it.mediaGroupKey ?: MediaIdentity.groupKey(it.finalUrl ?: it.url) ?: "id:" + it.id) }
             .values
             .mapNotNull { variants -> variants.maxByOrNull(::qualityScore) }
@@ -197,6 +210,7 @@ object SnifferRepository {
                     put("extension", resource.extension)
                     put("fileName", resource.fileName)
                     put("localCachePath", resource.localCachePath)
+                    put("thumbnailUrl", resource.thumbnailUrl)
                     put("contentLength", resource.contentLength)
                     put("type", resource.type.name)
                     put("streamType", resource.streamType?.name)
@@ -250,6 +264,7 @@ object SnifferRepository {
                             extension = item.optString("extension").takeIf { it.isNotBlank() && it != "null" },
                             fileName = item.optString("fileName").takeIf { it.isNotBlank() && it != "null" },
                             localCachePath = item.optString("localCachePath").takeIf { it.isNotBlank() && it != "null" },
+                            thumbnailUrl = item.optString("thumbnailUrl").takeIf { it.isNotBlank() && it != "null" },
                             contentLength = if (item.isNull("contentLength")) null else item.optLong("contentLength"),
                             type = runCatching { ResourceType.valueOf(item.getString("type")) }.getOrDefault(ResourceType.OTHER),
                             streamType = item.optString("streamType").takeIf { it.isNotBlank() && it != "null" }

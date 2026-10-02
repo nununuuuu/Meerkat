@@ -26,6 +26,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         width: Int? = null,
         height: Int? = null,
         durationMs: Long? = null,
+        thumbnailUrl: String? = null,
     ) {
         val classification = ResourceClassifier.classify(url, mimeType)
         if (classification.type == ResourceType.OTHER) return
@@ -52,6 +53,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 width = width,
                 height = height,
                 durationMs = durationMs,
+                thumbnailUrl = thumbnailUrl?.takeIf { it.startsWith("https://") || it.startsWith("http://") },
                 mediaGroupKey = MediaIdentity.groupKey(url),
             )
         val generation = SnifferRepository.generation
